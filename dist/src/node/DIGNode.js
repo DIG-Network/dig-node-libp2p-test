@@ -21,11 +21,16 @@ import { randomBytes } from 'crypto';
 import { readFile, readdir, stat, watch, writeFile } from 'fs/promises';
 import { join, basename } from 'path';
 import { homedir } from 'os';
-import { DIG_PROTOCOL, DIG_DISCOVERY_PROTOCOL } from './types';
-import { generateCryptoIPv6, parseURN } from './utils';
-import { Logger } from './logger';
-import { GlobalDiscovery } from './GlobalDiscovery';
-import { WebSocketRelay } from './WebSocketRelay';
+import { DIG_PROTOCOL, DIG_DISCOVERY_PROTOCOL } from './types.js';
+import { generateCryptoIPv6, parseURN } from './utils.js';
+import { Logger } from './logger.js';
+import { GlobalDiscovery } from './GlobalDiscovery.js';
+import { WebSocketRelay } from './WebSocketRelay.js';
+import { E2EEncryption } from './E2EEncryption.js';
+import express from 'express';
+import cors from 'cors';
+import { createServer } from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 export class DIGNode {
     constructor(config = {}) {
         this.config = config;
@@ -38,8 +43,21 @@ export class DIGNode {
         this.isStarted = false;
         this.logger = new Logger('DIGNode');
         this.startTime = 0;
+        this.e2eEncryption = new E2EEncryption();
+        this.peerProtocolVersions = new Map(); // peerId -> protocol version
         this.requestCounts = new Map();
+        // Built-in Bootstrap Server
+        this.app = express();
+        this.httpServer = createServer(this.app);
+        this.io = new SocketIOServer(this.httpServer, {
+            cors: { origin: "*", methods: ["GET", "POST"] }
+        });
+        this.registeredPeers = new Map();
+        this.relayConnections = new Map();
+        this.turnServers = new Map();
+        this.cleanupInterval = null;
         this.MAX_REQUESTS_PER_MINUTE = 100;
+        this.PEER_TIMEOUT = 10 * 60 * 1000; // 10 minutes
         this.metrics = {
             filesLoaded: 0,
             filesShared: 0,
@@ -53,6 +71,7 @@ export class DIGNode {
         // Validate and set configuration
         this.validateConfig(config);
         this.digPath = config.digPath || join(homedir(), '.dig');
+        this.setupBuiltInBootstrapServer();
     }
     // Get bootstrap server hostname for TURN configuration
     getBootstrapServerHost() {
@@ -194,6 +213,7 @@ export class DIGNode {
             this.startStoreSync();
             await this.startGlobalDiscovery();
             await this.startWebSocketRelay();
+            await this.startBuiltInBootstrapServer();
             await this.detectTurnCapability();
             await this.connectToConfiguredPeers();
             this.isStarted = true;
@@ -224,6 +244,10 @@ export class DIGNode {
             clearInterval(this.syncInterval);
             this.syncInterval = null;
         }
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+        }
         if (this.globalDiscovery) {
             try {
                 await this.globalDiscovery.stop();
@@ -240,12 +264,15 @@ export class DIGNode {
                 this.logger.warn('Error stopping WebSocket relay:', error);
             }
         }
+        if (this.httpServer) {
+            this.httpServer.close();
+            this.logger.info('📡 Built-in bootstrap server stopped');
+        }
         if (this.watcher) {
             try {
                 await this.watcher.close();
             }
             catch (error) {
-                // Watcher might not have a close method or might already be closed
                 console.log('📁 File watcher closed');
             }
             this.watcher = null;
@@ -316,6 +343,185 @@ export class DIGNode {
             metrics: this.getMetrics(),
             addresses: this.node ? this.node.getMultiaddrs().map(addr => addr.toString()) : []
         };
+    }
+    // Setup built-in bootstrap server
+    setupBuiltInBootstrapServer() {
+        this.app.use(cors({ origin: '*', methods: ['GET', 'POST', 'DELETE'] }));
+        this.app.use(express.json({ limit: '1mb' }));
+        // Health check
+        this.app.get('/health', (req, res) => {
+            res.json({
+                status: 'ok',
+                service: 'Unified DIG Node',
+                version: '1.0.0',
+                protocolVersion: E2EEncryption.getProtocolVersion(),
+                peers: this.registeredPeers.size,
+                stores: this.digFiles.size,
+                turnServers: this.turnServers.size,
+                uptime: this.isStarted ? Date.now() - this.startTime : 0,
+                capabilities: E2EEncryption.getProtocolCapabilities(),
+                timestamp: new Date().toISOString()
+            });
+        });
+        // Register peer
+        this.app.post('/register', async (req, res) => {
+            try {
+                const { peerId, addresses, cryptoIPv6, stores = [], version = '1.0.0' } = req.body;
+                if (!peerId || !addresses || !Array.isArray(addresses)) {
+                    res.status(400).json({ error: 'Missing required fields: peerId, addresses' });
+                    return;
+                }
+                const now = Date.now();
+                this.registeredPeers.set(peerId, {
+                    peerId, addresses, cryptoIPv6, stores,
+                    timestamp: now, lastSeen: now, version
+                });
+                this.logger.info(`📡 Peer registered via built-in bootstrap: ${peerId}`);
+                res.json({ success: true, peerId, totalPeers: this.registeredPeers.size });
+            }
+            catch (error) {
+                res.status(500).json({ error: 'Registration failed' });
+            }
+        });
+        // Get peers
+        this.app.get('/peers', (req, res) => {
+            try {
+                const now = Date.now();
+                const includeStores = req.query.includeStores === 'true';
+                const activePeers = Array.from(this.registeredPeers.values())
+                    .filter((peer) => now - peer.lastSeen < this.PEER_TIMEOUT);
+                res.json({
+                    peers: activePeers.map((peer) => ({
+                        peerId: peer.peerId,
+                        addresses: peer.addresses,
+                        cryptoIPv6: peer.cryptoIPv6,
+                        stores: includeStores ? peer.stores : undefined,
+                        lastSeen: peer.lastSeen,
+                        version: peer.version
+                    })),
+                    total: activePeers.length,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            catch (error) {
+                res.status(500).json({ error: 'Failed to get peers' });
+            }
+        });
+    }
+    // Start the built-in bootstrap server
+    async startBuiltInBootstrapServer() {
+        const port = this.getBootstrapPort();
+        return new Promise((resolve, reject) => {
+            this.httpServer.listen(port, '0.0.0.0', () => {
+                this.logger.info(`🌍 Built-in bootstrap server started on port ${port}`);
+                this.logger.info(`📡 Other nodes can bootstrap from this node at: http://[YOUR_IP]:${port}`);
+                resolve();
+            });
+            this.httpServer.on('error', (error) => {
+                this.logger.error('Failed to start built-in bootstrap server:', error);
+                reject(error);
+            });
+        });
+    }
+    getBootstrapPort() {
+        return (this.config.port || 4001) + 1000; // Bootstrap on P2P port + 1000
+    }
+    // Handle protocol handshake and establish end-to-end encryption
+    async handleProtocolHandshake(request, peerId) {
+        try {
+            const { protocolVersion, supportedFeatures, publicKey } = request;
+            this.logger.info(`🤝 Protocol handshake from ${peerId}: v${protocolVersion}`);
+            // Store peer's protocol version
+            if (protocolVersion) {
+                this.peerProtocolVersions.set(peerId, protocolVersion);
+            }
+            // Establish shared secret for end-to-end encryption
+            if (publicKey) {
+                this.e2eEncryption.establishSharedSecret(peerId, publicKey);
+                this.logger.info(`🔐 End-to-end encryption established with ${peerId}`);
+            }
+            // Determine compatible features
+            const myFeatures = E2EEncryption.getProtocolCapabilities();
+            const peerFeatures = supportedFeatures || [];
+            const compatibleFeatures = myFeatures.filter(feature => peerFeatures.includes(feature));
+            this.logger.info(`✅ Compatible features with ${peerId}: ${compatibleFeatures.join(', ')}`);
+            return {
+                success: true,
+                protocolVersion: E2EEncryption.getProtocolVersion(),
+                supportedFeatures: myFeatures,
+                publicKey: this.e2eEncryption.getPublicKey(),
+                metadata: {
+                    compatibleFeatures,
+                    encryptionEnabled: !!publicKey,
+                    nodeCapabilities: {
+                        storeCount: this.digFiles.size,
+                        turnCapable: await this.checkTurnCapability(),
+                        relaySupport: true
+                    }
+                }
+            };
+        }
+        catch (error) {
+            this.logger.error(`Handshake failed with ${peerId}:`, error);
+            return {
+                success: false,
+                error: `Handshake failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                protocolVersion: E2EEncryption.getProtocolVersion()
+            };
+        }
+    }
+    // Check if this node can act as TURN server
+    async checkTurnCapability() {
+        const addresses = this.node?.getMultiaddrs() || [];
+        const externalAddresses = addresses.filter(addr => {
+            const addrStr = addr.toString();
+            return !addrStr.includes('127.0.0.1') &&
+                !addrStr.includes('::1') &&
+                !addrStr.includes('192.168.') &&
+                !addrStr.includes('10.0.');
+        });
+        return externalAddresses.length > 0;
+    }
+    // Initiate protocol handshake with peer
+    async initiateProtocolHandshake(peerId) {
+        try {
+            const peer = this.node.getPeers().find(p => p.toString() === peerId);
+            if (!peer)
+                return;
+            this.logger.info(`🤝 Initiating handshake with peer: ${peerId}`);
+            const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL);
+            const handshakeRequest = {
+                type: 'HANDSHAKE',
+                protocolVersion: E2EEncryption.getProtocolVersion(),
+                supportedFeatures: E2EEncryption.getProtocolCapabilities(),
+                publicKey: this.e2eEncryption.getPublicKey()
+            };
+            const self = this;
+            await pipe([uint8ArrayFromString(JSON.stringify(handshakeRequest))], stream, async function (source) {
+                const chunks = [];
+                for await (const chunk of source) {
+                    chunks.push(chunk);
+                }
+                if (chunks.length > 0) {
+                    try {
+                        const response = JSON.parse(uint8ArrayToString(chunks[0]));
+                        if (response.success && response.publicKey) {
+                            // Establish shared secret for encryption
+                            self.e2eEncryption.establishSharedSecret(peerId, response.publicKey);
+                            self.peerProtocolVersions.set(peerId, response.protocolVersion);
+                            self.logger.info(`✅ Handshake completed with ${peerId} (v${response.protocolVersion})`);
+                            self.logger.info(`🔐 End-to-end encryption active with ${peerId}`);
+                        }
+                    }
+                    catch (parseError) {
+                        self.logger.warn(`Failed to parse handshake response from ${peerId}:`, parseError);
+                    }
+                }
+            });
+        }
+        catch (error) {
+            this.logger.warn(`Failed to initiate handshake with ${peerId}:`, error);
+        }
     }
     // Scan ~/.dig directory for .dig files
     async scanDIGFiles() {
@@ -405,7 +611,12 @@ export class DIGNode {
                         self.logger.warn(`Invalid request type from peer ${peerId}`);
                         return;
                     }
-                    if (request.type === 'GET_FILE') {
+                    if (request.type === 'HANDSHAKE') {
+                        // Handle protocol handshake and establish encryption
+                        const handshakeResponse = await self.handleProtocolHandshake(request, peerId);
+                        yield uint8ArrayFromString(JSON.stringify(handshakeResponse));
+                    }
+                    else if (request.type === 'GET_FILE') {
                         const { storeId, filePath } = request;
                         if (self.validateStoreId(storeId) && filePath) {
                             yield* self.serveFileFromStore(storeId, filePath);
@@ -760,11 +971,17 @@ export class DIGNode {
             this.metrics.peersConnected++;
             this.logger.info(`🤝 Connected to peer: ${peerId}`);
             this.logger.info(`📊 Total connected peers: ${this.node.getPeers().length}`);
-            // Discover stores from this peer
-            this.discoverPeerStores(peerId).catch(error => {
-                this.metrics.errors++;
-                this.logger.warn(`❌ Failed to discover stores from peer ${peerId}:`, error);
+            // Initiate protocol handshake for encryption and capability negotiation
+            this.initiateProtocolHandshake(peerId).catch(error => {
+                this.logger.warn(`Handshake failed with ${peerId}:`, error);
             });
+            // Discover stores from this peer (after handshake)
+            setTimeout(() => {
+                this.discoverPeerStores(peerId).catch(error => {
+                    this.metrics.errors++;
+                    this.logger.warn(`❌ Failed to discover stores from peer ${peerId}:`, error);
+                });
+            }, 1000); // Wait for handshake to complete
         });
         this.node.addEventListener('peer:disconnect', (event) => {
             const peerId = event.detail.toString();
@@ -912,11 +1129,11 @@ export class DIGNode {
         catch (turnError) {
             this.logger.warn(`TURN server download failed: ${turnError}`);
         }
-        // 4. LAST RESORT: Use bootstrap server relay
-        console.log(`🔄 TURN servers failed, trying bootstrap server as last resort...`);
+        // 4. ABSOLUTE LAST RESORT: Use bootstrap server relay (only if no TURN servers available)
+        console.log(`🔄 No TURN servers available, trying bootstrap server as absolute last resort...`);
         try {
             await this.downloadStoreViaBootstrap(storeId);
-            console.log(`✅ Downloaded ${storeId} via bootstrap server (last resort)`);
+            console.log(`✅ Downloaded ${storeId} via bootstrap server (absolute last resort)`);
         }
         catch (bootstrapError) {
             console.warn(`❌ All download methods failed for store ${storeId}:`, bootstrapError);
@@ -995,9 +1212,9 @@ export class DIGNode {
         }
         const turnData = await turnResponse.json();
         if (!turnData.turnServers || turnData.turnServers.length === 0) {
-            throw new Error('No TURN servers available');
+            throw new Error('No peer TURN servers available - will fall back to bootstrap server');
         }
-        this.logger.info(`🔄 Found ${turnData.turnServers.length} available TURN servers`);
+        this.logger.info(`🔄 Found ${turnData.turnServers.length} peer TURN servers available (avoiding bootstrap server)`);
         // Try each TURN server in order of lowest load
         for (const turnServer of turnData.turnServers) {
             try {

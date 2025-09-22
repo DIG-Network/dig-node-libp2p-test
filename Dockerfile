@@ -56,5 +56,5 @@ ENV PORT=3000
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start the bootstrap server
-CMD ["node", "dist/examples/bootstrap-server.js"]
+# Start the unified DIG node (P2P + Bootstrap + TURN + Encryption)
+CMD ["node", "dist/examples/unified-dig-node.js"]

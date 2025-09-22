@@ -34,10 +34,15 @@ export interface DIGNodeConfig {
 }
 
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'HANDSHAKE';
   storeId?: string;
   filePath?: string;
   urn?: string;
+  // Protocol negotiation
+  protocolVersion?: string;
+  supportedFeatures?: string[];
+  publicKey?: string; // For end-to-end encryption
+  encryptedPayload?: string; // Encrypted request data
 }
 
 export interface DIGResponse {
@@ -48,6 +53,11 @@ export interface DIGResponse {
   storeId?: string;
   files?: string[];
   metadata?: any;
+  // Protocol negotiation response
+  protocolVersion?: string;
+  supportedFeatures?: string[];
+  publicKey?: string; // For end-to-end encryption
+  encryptedPayload?: string; // Encrypted response data
 }
 
 export interface DIGPeer {

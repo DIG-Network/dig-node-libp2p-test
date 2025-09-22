@@ -1,5 +1,5 @@
 import type { Libp2p } from 'libp2p';
-import { DIGNodeConfig } from './types';
+import { DIGNodeConfig } from './types.js';
 export declare class DIGNode {
     private config;
     private node;
@@ -16,8 +16,18 @@ export declare class DIGNode {
     private startTime;
     private globalDiscovery;
     private webSocketRelay;
+    private e2eEncryption;
+    private peerProtocolVersions;
     private requestCounts;
+    private app;
+    private httpServer;
+    private io;
+    private registeredPeers;
+    private relayConnections;
+    private turnServers;
+    private cleanupInterval;
     private readonly MAX_REQUESTS_PER_MINUTE;
+    private readonly PEER_TIMEOUT;
     private metrics;
     constructor(config?: DIGNodeConfig);
     private getBootstrapServerHost;
@@ -30,6 +40,12 @@ export declare class DIGNode {
     private sanitizeFilePath;
     getMetrics(): any;
     getStatus(): any;
+    private setupBuiltInBootstrapServer;
+    private startBuiltInBootstrapServer;
+    private getBootstrapPort;
+    private handleProtocolHandshake;
+    private checkTurnCapability;
+    private initiateProtocolHandshake;
     private scanDIGFiles;
     private loadDIGFile;
     private isRateLimited;

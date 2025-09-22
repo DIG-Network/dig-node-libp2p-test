@@ -26,10 +26,14 @@ export interface DIGNodeConfig {
     turnPort?: number;
 }
 export interface DIGRequest {
-    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT';
+    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'HANDSHAKE';
     storeId?: string;
     filePath?: string;
     urn?: string;
+    protocolVersion?: string;
+    supportedFeatures?: string[];
+    publicKey?: string;
+    encryptedPayload?: string;
 }
 export interface DIGResponse {
     success: boolean;
@@ -39,6 +43,10 @@ export interface DIGResponse {
     storeId?: string;
     files?: string[];
     metadata?: any;
+    protocolVersion?: string;
+    supportedFeatures?: string[];
+    publicKey?: string;
+    encryptedPayload?: string;
 }
 export interface DIGPeer {
     peerId: string;

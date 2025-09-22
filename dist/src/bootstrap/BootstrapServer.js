@@ -327,7 +327,7 @@ export class BootstrapServer {
         // Relay store content between peers
         this.app.post('/relay-store', async (req, res) => {
             try {
-                const { fromPeerId, toPeerId, storeId } = req.body;
+                const { fromPeerId, toPeerId, storeId, turnServerId } = req.body;
                 if (!fromPeerId || !toPeerId || !storeId) {
                     res.status(400).json({
                         error: 'fromPeerId, toPeerId, and storeId are required'
@@ -352,8 +352,33 @@ export class BootstrapServer {
                     });
                     return;
                 }
+                // Check if a specific TURN server was requested
+                if (turnServerId) {
+                    const turnServer = this.turnServers.get(turnServerId);
+                    if (!turnServer) {
+                        res.status(404).json({
+                            error: 'Requested TURN server not available',
+                            turnServerId
+                        });
+                        return;
+                    }
+                    // Update load for round-robin
+                    turnServer.currentLoad++;
+                    this.logger.info(`🔄 Using TURN server ${turnServerId} (load: ${turnServer.currentLoad}/${turnServer.capacity})`);
+                }
+                // Only use bootstrap server relay if no peer TURN servers are available
+                const availableTurnServers = Array.from(this.turnServers.values())
+                    .filter(server => Date.now() - server.lastSeen < this.PEER_TIMEOUT);
+                if (availableTurnServers.length > 0 && !turnServerId) {
+                    res.status(409).json({
+                        error: 'Peer TURN servers available - use them instead of bootstrap server',
+                        availableTurnServers: availableTurnServers.length,
+                        message: 'Bootstrap server should only be used when no peer TURN servers exist'
+                    });
+                    return;
+                }
                 // Request the actual store content from the source peer via WebSocket
-                this.logger.info(`🔄 Requesting store ${storeId} from source peer ${fromPeerId} via WebSocket`);
+                this.logger.info(`🔄 Requesting store ${storeId} from source peer ${fromPeerId} via ${turnServerId ? 'TURN server' : 'bootstrap relay'}`);
                 const sourceSocket = this.relayConnections.get(fromPeerId);
                 if (!sourceSocket) {
                     res.status(404).json({
