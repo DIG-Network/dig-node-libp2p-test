@@ -15,6 +15,7 @@ export declare class DIGNode {
     private logger;
     private startTime;
     private globalDiscovery;
+    private webSocketRelay;
     private requestCounts;
     private readonly MAX_REQUESTS_PER_MINUTE;
     private metrics;
@@ -56,10 +57,14 @@ export declare class DIGNode {
     private syncStores;
     private downloadStoreFromPeers;
     private startGlobalDiscovery;
+    private startWebSocketRelay;
     private connectToDiscoveredPeers;
     private connectToConfiguredPeers;
     connectToPeer(peerAddress: string): Promise<void>;
     getConnectionInfo(): any;
     forceConnectToPeers(): Promise<void>;
+    private connectViaRelay;
+    private initiateRelayConnection;
+    private handleRelayOffer;
     discoverAllPeers(): Promise<void>;
 }
