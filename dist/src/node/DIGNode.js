@@ -840,10 +840,7 @@ export class DIGNode {
             for (const peer of connectedPeers) {
                 await this.discoverPeerStores(peer.toString());
             }
-            // Always try to sync stores from all discovered peers via bootstrap server
-            // This works even without direct LibP2P connections
-            await this.syncStoresViaBootstrap();
-            // Find missing stores
+            // Find missing stores from LibP2P connected peers first
             const allRemoteStores = new Set();
             for (const [peerId, stores] of this.peerStores) {
                 for (const storeId of stores) {
@@ -852,15 +849,20 @@ export class DIGNode {
             }
             const missingStores = Array.from(allRemoteStores).filter(storeId => !this.digFiles.has(storeId));
             if (missingStores.length > 0) {
-                console.log(`📥 Found ${missingStores.length} missing stores to download`);
-                // Download missing stores
+                console.log(`📥 Found ${missingStores.length} missing stores to download via LibP2P`);
+                // Download missing stores from LibP2P connected peers first
                 for (const storeId of missingStores) {
                     await this.downloadStoreFromPeers(storeId);
                 }
                 this.metrics.syncSuccesses++;
             }
+            // Only use bootstrap server as LAST RESORT if no LibP2P peers available
+            if (connectedPeers.length === 0) {
+                this.logger.info('🔄 No LibP2P peers available, trying bootstrap server as last resort...');
+                await this.syncStoresViaBootstrap();
+            }
             else {
-                console.log(`✅ All stores synchronized (${this.digFiles.size} total)`);
+                console.log(`✅ All stores synchronized via LibP2P (${this.digFiles.size} total)`);
                 this.metrics.syncSuccesses++;
             }
         }
@@ -872,11 +874,11 @@ export class DIGNode {
             this.syncInProgress = false;
         }
     }
-    // Download a store from any available peer
+    // Download a store from any available peer (prioritize LibP2P, fallback to bootstrap)
     async downloadStoreFromPeers(storeId) {
         this.metrics.downloadAttempts++;
         console.log(`📥 Downloading store: ${storeId}`);
-        // Find peers that have this store
+        // 1. FIRST PRIORITY: Find LibP2P connected peers that have this store
         const availablePeers = [];
         for (const [peerId, stores] of this.peerStores) {
             if (stores.has(storeId)) {
@@ -886,75 +888,88 @@ export class DIGNode {
                 }
             }
         }
-        if (availablePeers.length === 0) {
-            console.warn(`❌ No peers available for store ${storeId}`);
-            return;
-        }
-        // Try to download from the first available peer
-        for (const { peerId, peer } of availablePeers) {
-            try {
-                console.log(`📡 Downloading ${storeId} from peer ${peerId}`);
-                const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL);
-                const request = {
-                    type: 'GET_STORE_CONTENT',
-                    storeId: storeId
-                };
-                const chunks = [];
-                let metadata = null;
-                let isFirstChunk = true;
-                await pipe([uint8ArrayFromString(JSON.stringify(request))], stream, async function (source) {
-                    for await (const chunk of source) {
-                        if (isFirstChunk) {
-                            try {
-                                const response = JSON.parse(uint8ArrayToString(chunk));
-                                if (response.success) {
-                                    metadata = response;
-                                    isFirstChunk = false;
-                                    continue;
-                                }
-                                else {
-                                    throw new Error(response.error || 'Download failed');
-                                }
-                            }
-                            catch (parseError) {
-                                // If parsing fails, treat as binary data
-                                chunks.push(chunk);
-                            }
-                        }
-                        else {
-                            chunks.push(chunk);
-                        }
-                    }
-                });
-                if (chunks.length > 0) {
-                    // Combine all chunks
-                    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-                    const content = new Uint8Array(totalLength);
-                    let offset = 0;
-                    for (const chunk of chunks) {
-                        content.set(chunk, offset);
-                        offset += chunk.length;
-                    }
-                    // Save the downloaded store
-                    const filePath = join(this.digPath, `${storeId}.dig`);
-                    await writeFile(filePath, Buffer.from(content));
-                    // Load it into our stores
-                    await this.loadDIGFile(filePath);
-                    if (this.digFiles.has(storeId)) {
-                        await this.announceStore(storeId);
-                        this.metrics.downloadSuccesses++;
-                        this.metrics.filesShared++;
-                        console.log(`✅ Downloaded and loaded store: ${storeId} (${content.length} bytes)`);
-                        return; // Success, no need to try other peers
-                    }
+        // 2. Try LibP2P download first
+        if (availablePeers.length > 0) {
+            console.log(`📡 Attempting LibP2P download from ${availablePeers.length} connected peers`);
+            for (const { peerId, peer } of availablePeers) {
+                try {
+                    await this.downloadStoreFromLibP2PPeer(storeId, peerId, peer);
+                    return; // Success, no need to try other methods
+                }
+                catch (error) {
+                    this.logger.warn(`LibP2P download failed from peer ${peerId}:`, error);
                 }
             }
-            catch (error) {
-                console.warn(`❌ Failed to download ${storeId} from peer ${peerId}:`, error);
-                // Continue to try next peer
+        }
+        // 3. LAST RESORT: Use bootstrap server relay only if LibP2P failed
+        console.log(`🔄 LibP2P download failed, trying bootstrap server as last resort...`);
+        try {
+            await this.downloadStoreViaBootstrap(storeId);
+            console.log(`✅ Downloaded ${storeId} via bootstrap server (last resort)`);
+        }
+        catch (bootstrapError) {
+            console.warn(`❌ All download methods failed for store ${storeId}:`, bootstrapError);
+        }
+    }
+    // Download store from LibP2P connected peer
+    async downloadStoreFromLibP2PPeer(storeId, peerId, peer) {
+        console.log(`📡 Downloading ${storeId} from LibP2P peer ${peerId}`);
+        const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL);
+        const request = {
+            type: 'GET_STORE_CONTENT',
+            storeId: storeId
+        };
+        const chunks = [];
+        let metadata = null;
+        let isFirstChunk = true;
+        await pipe([uint8ArrayFromString(JSON.stringify(request))], stream, async function (source) {
+            for await (const chunk of source) {
+                if (isFirstChunk) {
+                    try {
+                        const response = JSON.parse(uint8ArrayToString(chunk));
+                        if (response.success) {
+                            metadata = response;
+                            isFirstChunk = false;
+                            continue;
+                        }
+                        else {
+                            throw new Error(response.error || 'Download failed');
+                        }
+                    }
+                    catch (parseError) {
+                        // If parsing fails, treat as binary data
+                        chunks.push(chunk);
+                    }
+                }
+                else {
+                    chunks.push(chunk);
+                }
+            }
+        });
+        if (chunks.length > 0) {
+            // Combine all chunks
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const content = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                content.set(chunk, offset);
+                offset += chunk.length;
+            }
+            // Save the downloaded store
+            const filePath = join(this.digPath, `${storeId}.dig`);
+            await writeFile(filePath, Buffer.from(content));
+            // Load it into our stores
+            await this.loadDIGFile(filePath);
+            if (this.digFiles.has(storeId)) {
+                await this.announceStore(storeId);
+                this.metrics.downloadSuccesses++;
+                this.metrics.filesShared++;
+                console.log(`✅ Downloaded and loaded store via LibP2P: ${storeId} (${content.length} bytes)`);
             }
         }
-        console.warn(`❌ Failed to download store ${storeId} from all available peers`);
+        else {
+            throw new Error('No content received from LibP2P peer');
+        }
     }
     // Start global discovery system
     async startGlobalDiscovery() {
@@ -1063,7 +1078,7 @@ export class DIGNode {
                 }
                 catch (directError) {
                     this.logger.warn(`Direct connection failed: ${directError instanceof Error ? directError.message : directError}`);
-                    // Try circuit relay connection - this creates a REAL LibP2P connection
+                    // 1. Try circuit relay connection first (REAL LibP2P connection)
                     try {
                         this.logger.info(`🔄 Attempting circuit relay connection to: ${peerIdFromAddr}`);
                         const relayAddr = this.createCircuitRelayAddress(address);
@@ -1078,6 +1093,17 @@ export class DIGNode {
                     }
                     catch (relayError) {
                         this.logger.warn(`Circuit relay connection failed: ${relayError instanceof Error ? relayError.message : relayError}`);
+                        // 2. Only try WebSocket relay as LAST RESORT
+                        if (this.webSocketRelay && this.webSocketRelay.isConnected() && peerIdFromAddr) {
+                            try {
+                                this.logger.info(`🔄 LAST RESORT: Attempting WebSocket relay connection to: ${peerIdFromAddr}`);
+                                connection = await this.connectViaRelay(peerIdFromAddr);
+                                this.logger.info(`🌐 Connected via WebSocket relay (last resort)`);
+                            }
+                            catch (wsRelayError) {
+                                this.logger.warn(`WebSocket relay (last resort) failed: ${wsRelayError instanceof Error ? wsRelayError.message : wsRelayError}`);
+                            }
+                        }
                     }
                 }
                 if (!connection || typeof connection !== 'object' || !('remotePeer' in connection)) {

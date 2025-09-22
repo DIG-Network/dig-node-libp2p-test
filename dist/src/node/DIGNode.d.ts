@@ -57,6 +57,7 @@ export declare class DIGNode {
     private discoverPeerStores;
     private syncStores;
     private downloadStoreFromPeers;
+    private downloadStoreFromLibP2PPeer;
     private startGlobalDiscovery;
     private startWebSocketRelay;
     private connectToDiscoveredPeers;
