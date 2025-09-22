@@ -6,11 +6,9 @@ async function main() {
     port: parseInt(process.env.DIG_PORT || '4001'),
     digPath: process.env.DIG_PATH || undefined,
     
-    // Global discovery configuration
+    // Global discovery configuration - using deployed bootstrap server
     discoveryServers: [
-      'http://bootstrap1.dig.net:3000',
-      'http://bootstrap2.dig.net:3000',
-      'http://bootstrap3.dig.net:3000'
+      'http://dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
     ],
     
     // Enable all discovery mechanisms
