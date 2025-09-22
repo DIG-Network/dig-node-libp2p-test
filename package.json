@@ -1,0 +1,42 @@
+{
+  "name": "dig-network-node",
+  "version": "1.0.0",
+  "description": "DIG Network P2P Node for .dig file sharing",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build-all": "npm run build && npm run build-sw",
+    "dev": "tsx watch examples/basic-node.ts",
+    "start": "node dist/examples/basic-node.js",
+    "start:prod": "node dist/examples/production-node.js",
+    "dev:prod": "tsx examples/production-node.ts",
+    "test": "tsx examples/test-node.ts",
+    "build-sw": "tsc src/service-worker/dig-service-worker.ts --outDir public --target es2020 --lib es2020,webworker --skipLibCheck",
+    "serve": "http-server public -p 3000"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^16.1.4",
+    "@chainsafe/libp2p-yamux": "^7.0.4",
+    "@libp2p/bootstrap": "latest",
+    "@libp2p/identify": "^3.0.39",
+    "@libp2p/kad-dht": "latest",
+    "@libp2p/mdns": "latest",
+    "@libp2p/tcp": "latest",
+    "cors": "^2.8.5",
+    "express": "^4.18.0",
+    "it-pipe": "latest",
+    "jszip": "^3.10.0",
+    "libp2p": "latest",
+    "uint8arrays": "latest"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jszip": "^3.4.0",
+    "@types/node": "^20.0.0",
+    "http-server": "^14.1.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

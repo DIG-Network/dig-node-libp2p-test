@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DIG Network Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px;
+        }
+        
+        .section {
+            background: #f8f9fa;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .input-group {
+            margin: 15px 0;
+        }
+        
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        
+        .input-group input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        
+        .btn:hover {
+            background: #5a67d8;
+        }
+        
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .result {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            background: white;
+            min-height: 50px;
+        }
+        
+        .success {
+            border-color: #48bb78;
+            background-color: #f0fff4;
+            color: #2d3748;
+        }
+        
+        .error {
+            border-color: #f56565;
+            background-color: #fed7d7;
+            color: #2d3748;
+        }
+        
+        .info {
+            border-color: #4299e1;
+            background-color: #ebf8ff;
+            color: #2d3748;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        
+        .status.ready {
+            background-color: #c6f6d5;
+            color: #22543d;
+        }
+        
+        .status.loading {
+            background-color: #fef5e7;
+            color: #744210;
+        }
+        
+        .status.error {
+            background-color: #fed7d7;
+            color: #742a2a;
+        }
+        
+        .examples {
+            background: #e2e8f0;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        
+        .examples h4 {
+            margin-top: 0;
+            color: #4a5568;
+        }
+        
+        .examples code {
+            background: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            display: block;
+            margin: 5px 0;
+            cursor: pointer;
+        }
+        
+        .examples code:hover {
+            background: #f7fafc;
+        }
+        
+        pre {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌐 DIG Network Demo</h1>
+        <p>Test DIP-0001 URN resolution and P2P content distribution</p>
+        <div id="serviceWorkerStatus" class="status loading">Initializing Service Worker...</div>
+    </div>
+
+    <div class="section">
+        <h2>🔍 URN Resolution Test</h2>
+        <div class="input-group">
+            <label for="urnInput">DIG URN (DIP-0001 compliant):</label>
+            <input type="text" id="urnInput" placeholder="Enter DIP-0001 URN...">
+        </div>
+        <button class="btn" onclick="testURN()">Test URN</button>
+        <button class="btn" onclick="downloadContent()">Download Content</button>
+        <button class="btn" onclick="viewContent()">View Content</button>
+        <div id="urnResult" class="result"></div>
+        
+        <div class="examples">
+            <h4>Example URNs (click to use):</h4>
+            <code onclick="useExample(this)">urn:dig:chia:17f89f9af15a046431342694fd2c6df41be8736287e97f6af8327945e59054fb/index.html</code>
+            <code onclick="useExample(this)">urn:dig:chia:abc123def456789abc123def456789abc123def456789abc123def456789abc123/style.css</code>
+            <code onclick="useExample(this)">urn:dig:chia:def456abc789def456abc789def456abc789def456abc789def456abc789def456:roothash123/app.js</code>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🔗 DIG URL Test</h2>
+        <div class="input-group">
+            <label for="digUrlInput">DIG URL:</label>
+            <input type="text" id="digUrlInput" placeholder="dig://storeid/path/to/file">
+        </div>
+        <button class="btn" onclick="testDIGURL()">Test DIG URL</button>
+        <div id="digUrlResult" class="result"></div>
+        
+        <div class="examples">
+            <h4>Example DIG URLs (click to use):</h4>
+            <code onclick="useDigExample(this)">dig://17f89f9af15a046431342694fd2c6df41be8736287e97f6af8327945e59054fb/</code>
+            <code onclick="useDigExample(this)">dig://abc123def456789abc123def456789abc123def456789abc123def456789abc123/images/logo.png</code>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>📊 Gateway Status</h2>
+        <button class="btn" onclick="checkGatewayHealth()">Check Gateway Health</button>
+        <button class="btn" onclick="listStores()">List Available Stores</button>
+        <div id="gatewayResult" class="result"></div>
+    </div>
+
+    <div class="section">
+        <h2>🛠 Utility Functions</h2>
+        <div class="input-group">
+            <label for="storeIdInput">Store ID:</label>
+            <input type="text" id="storeIdInput" placeholder="Enter store ID...">
+        </div>
+        <div class="input-group">
+            <label for="filePathInput">File Path (optional):</label>
+            <input type="text" id="filePathInput" placeholder="path/to/file.html">
+        </div>
+        <button class="btn" onclick="createURN()">Create URN</button>
+        <button class="btn" onclick="createDIGURL()">Create DIG URL</button>
+        <button class="btn" onclick="discoverPeers()">Discover Peers</button>
+        <div id="utilityResult" class="result"></div>
+    </div>
+
+    <script>
+        let serviceWorkerReady = false;
+        const gatewayUrl = 'http://localhost:8080';
+
+        // Initialize Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/dig-service-worker.js')
+                .then(registration => {
+                    console.log('DIG Service Worker registered:', registration);
+                    return navigator.serviceWorker.ready;
+                })
+                .then(() => {
+                    serviceWorkerReady = true;
+                    updateServiceWorkerStatus();
+                })
+                .catch(err => {
+                    console.error('Service Worker registration failed:', err);
+                    updateServiceWorkerStatus(false);
+                });
+        } else {
+            updateServiceWorkerStatus(false);
+        }
+
+        function updateServiceWorkerStatus(ready = serviceWorkerReady) {
+            const status = document.getElementById('serviceWorkerStatus');
+            if (ready) {
+                status.textContent = '✅ Service Worker Ready';
+                status.className = 'status ready';
+            } else {
+                status.textContent = '❌ Service Worker Not Available';
+                status.className = 'status error';
+            }
+        }
+
+        function useExample(element) {
+            document.getElementById('urnInput').value = element.textContent;
+        }
+
+        function useDigExample(element) {
+            document.getElementById('digUrlInput').value = element.textContent;
+        }
+
+        async function testURN() {
+            const urn = document.getElementById('urnInput').value.trim();
+            const result = document.getElementById('urnResult');
+            
+            if (!urn) {
+                showResult(result, '❌ Please enter a URN', 'error');
+                return;
+            }
+
+            showResult(result, '🔄 Testing URN...', 'info');
+
+            try {
+                const response = await fetch(urn, { method: 'HEAD' });
+                if (response.ok) {
+                    showResult(result, `✅ URN resolved successfully!
+                        <br>Status: ${response.status}
+                        <br>Content-Type: ${response.headers.get('Content-Type') || 'Unknown'}
+                        <br>Content-Length: ${response.headers.get('Content-Length') || 'Unknown'}`, 'success');
+                } else {
+                    showResult(result, `❌ URN resolution failed
+                        <br>Status: ${response.status} ${response.statusText}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function downloadContent() {
+            const urn = document.getElementById('urnInput').value.trim();
+            const result = document.getElementById('urnResult');
+            
+            if (!urn) {
+                showResult(result, '❌ Please enter a URN', 'error');
+                return;
+            }
+
+            showResult(result, '⬇️ Downloading content...', 'info');
+
+            try {
+                const response = await fetch(urn);
+                if (response.ok) {
+                    const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+                    const size = response.headers.get('Content-Length');
+                    
+                    if (contentType.startsWith('text/') || contentType.includes('json')) {
+                        const text = await response.text();
+                        showResult(result, `✅ Content downloaded (${size} bytes)
+                            <br>Content-Type: ${contentType}
+                            <br><pre>${text.substring(0, 500)}${text.length > 500 ? '...' : ''}</pre>`, 'success');
+                    } else {
+                        const blob = await response.blob();
+                        showResult(result, `✅ Binary content downloaded
+                            <br>Size: ${blob.size} bytes
+                            <br>Content-Type: ${contentType}`, 'success');
+                    }
+                } else {
+                    showResult(result, `❌ Download failed: ${response.status} ${response.statusText}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function viewContent() {
+            const urn = document.getElementById('urnInput').value.trim();
+            if (urn) {
+                window.open(urn, '_blank');
+            }
+        }
+
+        async function testDIGURL() {
+            const url = document.getElementById('digUrlInput').value.trim();
+            const result = document.getElementById('digUrlResult');
+            
+            if (!url) {
+                showResult(result, '❌ Please enter a DIG URL', 'error');
+                return;
+            }
+
+            showResult(result, '🔄 Testing DIG URL...', 'info');
+
+            try {
+                const response = await fetch(url, { method: 'HEAD' });
+                if (response.ok) {
+                    showResult(result, `✅ DIG URL resolved successfully!
+                        <br>Status: ${response.status}
+                        <br>Content-Type: ${response.headers.get('Content-Type') || 'Unknown'}`, 'success');
+                } else {
+                    showResult(result, `❌ DIG URL resolution failed: ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function checkGatewayHealth() {
+            const result = document.getElementById('gatewayResult');
+            showResult(result, '🔄 Checking gateway health...', 'info');
+
+            try {
+                const response = await fetch(`${gatewayUrl}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    showResult(result, `✅ Gateway is healthy!
+                        <br>Status: ${data.status}
+                        <br>Peer ID: ${data.peerId || 'Unknown'}
+                        <br>Stores: ${data.stores}
+                        <br>Crypto IPv6: ${data.cryptoIPv6 || 'Unknown'}`, 'success');
+                } else {
+                    showResult(result, `❌ Gateway health check failed: ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Gateway not accessible: ${error.message}`, 'error');
+            }
+        }
+
+        async function listStores() {
+            const result = document.getElementById('gatewayResult');
+            showResult(result, '🔄 Fetching store list...', 'info');
+
+            try {
+                const response = await fetch(`${gatewayUrl}/stores`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const storeList = data.stores.length > 0 
+                        ? data.stores.map(store => `<li>${store}</li>`).join('')
+                        : '<li>No stores available</li>';
+                    
+                    showResult(result, `✅ Available stores (${data.count}):
+                        <ul>${storeList}</ul>`, 'success');
+                } else {
+                    showResult(result, `❌ Failed to fetch stores: ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        function createURN() {
+            const storeId = document.getElementById('storeIdInput').value.trim();
+            const filePath = document.getElementById('filePathInput').value.trim();
+            const result = document.getElementById('utilityResult');
+
+            if (!storeId) {
+                showResult(result, '❌ Please enter a store ID', 'error');
+                return;
+            }
+
+            if (!/^[a-fA-F0-9]+$/.test(storeId) || storeId.length < 32) {
+                showResult(result, '❌ Invalid store ID format (must be hex, min 32 chars)', 'error');
+                return;
+            }
+
+            let urn = `urn:dig:chia:${storeId}`;
+            if (filePath) {
+                urn += `/${filePath}`;
+            }
+
+            showResult(result, `✅ Generated URN:
+                <br><code style="background: white; padding: 10px; display: block; margin: 10px 0; border-radius: 4px;">${urn}</code>`, 'success');
+        }
+
+        function createDIGURL() {
+            const storeId = document.getElementById('storeIdInput').value.trim();
+            const filePath = document.getElementById('filePathInput').value.trim();
+            const result = document.getElementById('utilityResult');
+
+            if (!storeId) {
+                showResult(result, '❌ Please enter a store ID', 'error');
+                return;
+            }
+
+            const url = filePath ? `dig://${storeId}/${filePath}` : `dig://${storeId}/`;
+            showResult(result, `✅ Generated DIG URL:
+                <br><code style="background: white; padding: 10px; display: block; margin: 10px 0; border-radius: 4px;">${url}</code>`, 'success');
+        }
+
+        async function discoverPeers() {
+            const storeId = document.getElementById('storeIdInput').value.trim();
+            const result = document.getElementById('utilityResult');
+
+            if (!storeId) {
+                showResult(result, '❌ Please enter a store ID', 'error');
+                return;
+            }
+
+            showResult(result, '🔄 Discovering peers...', 'info');
+
+            try {
+                const response = await fetch(`${gatewayUrl}/discover/${storeId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.peers.length > 0) {
+                        const peerList = data.peers.map(peer => 
+                            `<li>Peer ID: ${peer.peerId}<br>IPv6: ${peer.cryptoIPv6 || 'Unknown'}</li>`
+                        ).join('');
+                        showResult(result, `✅ Found ${data.count} peers:
+                            <ul>${peerList}</ul>`, 'success');
+                    } else {
+                        showResult(result, '❌ No peers found for this store', 'error');
+                    }
+                } else {
+                    showResult(result, `❌ Discovery failed: ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showResult(result, `❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        function showResult(element, message, type) {
+            element.innerHTML = message;
+            element.className = `result ${type}`;
+        }
+    </script>
+</body>
+</html>
