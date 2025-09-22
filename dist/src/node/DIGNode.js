@@ -8,6 +8,7 @@ import { mdns } from '@libp2p/mdns';
 import { ping } from '@libp2p/ping';
 import { identify } from '@libp2p/identify';
 import { pipe } from 'it-pipe';
+import { multiaddr } from '@multiformats/multiaddr';
 import { toString as uint8ArrayToString } from 'uint8arrays/to-string';
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string';
 import { randomBytes } from 'crypto';
@@ -910,11 +911,16 @@ export class DIGNode {
                 }
                 // Attempt connection with timeout
                 this.logger.info(`🔗 Dialing peer: ${peerIdFromAddr} at ${address}`);
+                const addr = multiaddr(address);
                 const connection = await Promise.race([
-                    this.node.dial(address),
+                    this.node.dial(addr),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout after 10s')), 10000))
                 ]);
-                const peerIdFromConn = connection.remotePeer.toString();
+                if (!connection || typeof connection !== 'object' || !('remotePeer' in connection)) {
+                    throw new Error('Invalid connection object returned');
+                }
+                const typedConnection = connection;
+                const peerIdFromConn = typedConnection.remotePeer.toString();
                 this.logger.info(`🌍 Successfully connected to discovered peer: ${peerIdFromConn}`);
                 this.logger.info(`📡 Connection address: ${address}`);
                 this.logger.info(`🔗 Connection established, remote peer: ${peerIdFromConn}`);
@@ -949,8 +955,13 @@ export class DIGNode {
         }
         try {
             this.logger.info(`🔗 Connecting to peer: ${peerAddress}`);
-            const connection = await this.node.dial(peerAddress);
-            this.logger.info(`✅ Connected to peer: ${connection.remotePeer.toString()}`);
+            const addr = multiaddr(peerAddress);
+            const connection = await this.node.dial(addr);
+            if (!connection || typeof connection !== 'object' || !('remotePeer' in connection)) {
+                throw new Error('Invalid connection object returned');
+            }
+            const typedConnection = connection;
+            this.logger.info(`✅ Connected to peer: ${typedConnection.remotePeer.toString()}`);
         }
         catch (error) {
             this.logger.error(`❌ Failed to connect to peer ${peerAddress}:`, error);
