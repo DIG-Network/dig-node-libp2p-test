@@ -47,11 +47,11 @@ resource "aws_s3_bucket" "eb_bucket" {
 
 # Application version
 resource "aws_elastic_beanstalk_application_version" "dig_bootstrap_version" {
-  name         = "v1.0.2"
+  name         = "v1.0.3"
   application  = aws_elastic_beanstalk_application.dig_bootstrap.name
-  description  = "DIG Network Bootstrap Server v1.0.2 - Working Docker image"
+  description  = "DIG Network Bootstrap Server v1.0.3 - With TURN/Relay Server"
   bucket       = aws_s3_bucket.eb_bucket.bucket
-  key          = "bootstrap-app-v3.zip"
+  key          = "bootstrap-app-v4.zip"
 
   depends_on = [aws_s3_bucket.eb_bucket]
 }
@@ -239,6 +239,22 @@ resource "aws_security_group" "dig_bootstrap" {
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # TURN server port for NAT traversal
+  ingress {
+    from_port   = 3478
+    to_port     = 3478
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # TURN server UDP port
+  ingress {
+    from_port   = 3478
+    to_port     = 3478
+    protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 

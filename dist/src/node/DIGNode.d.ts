@@ -19,6 +19,7 @@ export declare class DIGNode {
     private readonly MAX_REQUESTS_PER_MINUTE;
     private metrics;
     constructor(config?: DIGNodeConfig);
+    private getBootstrapServerHost;
     start(): Promise<void>;
     stop(): Promise<void>;
     private cleanup;

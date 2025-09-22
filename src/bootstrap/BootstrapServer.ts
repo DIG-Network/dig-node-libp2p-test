@@ -1,6 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import { createServer } from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 import { Logger } from '../node/logger.js';
+
+interface ExtendedSocket extends SocketIOServer {
+  peerId?: string;
+}
 
 interface RegisteredPeer {
   peerId: string;
@@ -19,14 +25,23 @@ interface RegisteredPeer {
 
 export class BootstrapServer {
   private app = express();
+  private server = createServer(this.app);
+  private io = new SocketIOServer(this.server, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    }
+  });
   private logger = new Logger('Bootstrap');
   private peers = new Map<string, RegisteredPeer>();
   private cleanupInterval: NodeJS.Timeout | null = null;
   private readonly PEER_TIMEOUT = 10 * 60 * 1000; // 10 minutes
   private readonly MAX_PEERS = 10000; // Limit for scalability
+  private relayConnections = new Map<string, any>(); // Active relay connections
   
   constructor(private port = 3000) {
     this.setupRoutes();
+    this.setupRelayServer();
     this.startCleanupTask();
   }
 
@@ -306,6 +321,74 @@ export class BootstrapServer {
         });
       }
     });
+
+    // Get relay server information
+    this.app.get('/relay-info', (req, res) => {
+      try {
+        res.json({
+          relayEnabled: true,
+          activeRelayConnections: this.relayConnections.size,
+          websocketUrl: `ws://${req.get('host')}/socket.io/`,
+          stunServers: [
+            'stun:stun.l.google.com:19302',
+            'stun:stun1.l.google.com:19302',
+            'stun:global.stun.twilio.com:3478'
+          ],
+          turnServer: `turn:${req.get('host')}:3478`,
+          relaySupport: {
+            webrtc: true,
+            websocket: true,
+            circuitRelay: true
+          }
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: 'Failed to get relay info'
+        });
+      }
+    });
+
+    // Initiate relay connection between peers
+    this.app.post('/initiate-relay', (req, res) => {
+      try {
+        const { fromPeerId, toPeerId } = req.body;
+        
+        if (!fromPeerId || !toPeerId) {
+          res.status(400).json({
+            error: 'fromPeerId and toPeerId are required'
+          });
+          return;
+        }
+
+        const fromSocket = this.relayConnections.get(fromPeerId);
+        const toSocket = this.relayConnections.get(toPeerId);
+
+        if (!fromSocket || !toSocket) {
+          res.status(404).json({
+            error: 'One or both peers not available for relay',
+            fromPeerAvailable: !!fromSocket,
+            toPeerAvailable: !!toSocket
+          });
+          return;
+        }
+
+        // Notify both peers to start relay negotiation
+        fromSocket.emit('relay-initiate', { targetPeerId: toPeerId });
+        toSocket.emit('relay-initiate', { targetPeerId: fromPeerId });
+
+        res.json({
+          success: true,
+          message: 'Relay initiation sent to both peers',
+          fromPeerId,
+          toPeerId
+        });
+
+      } catch (error) {
+        res.status(500).json({
+          error: 'Failed to initiate relay'
+        });
+      }
+    });
   }
 
   private groupBy(array: any[], key: string): Record<string, number> {
@@ -357,17 +440,76 @@ export class BootstrapServer {
     }, 5 * 60 * 1000);
   }
 
+  // Setup WebSocket relay server for NAT traversal
+  private setupRelayServer(): void {
+    this.io.on('connection', (socket) => {
+      this.logger.debug(`🔗 Relay connection from: ${socket.id}`);
+      
+      socket.on('register-relay', (data) => {
+        const { peerId } = data;
+        if (peerId) {
+          this.relayConnections.set(peerId, socket);
+          (socket as any).peerId = peerId;
+          this.logger.info(`📡 Relay registered for peer: ${peerId}`);
+          
+          socket.emit('relay-registered', { success: true });
+        }
+      });
+
+      socket.on('relay-offer', (data) => {
+        const { targetPeerId, offer, fromPeerId } = data;
+        const targetSocket = this.relayConnections.get(targetPeerId);
+        
+        if (targetSocket) {
+          targetSocket.emit('relay-offer', { offer, fromPeerId });
+          this.logger.debug(`🔄 Relaying offer from ${fromPeerId} to ${targetPeerId}`);
+        } else {
+          socket.emit('relay-error', { error: 'Target peer not available for relay' });
+        }
+      });
+
+      socket.on('relay-answer', (data) => {
+        const { targetPeerId, answer, fromPeerId } = data;
+        const targetSocket = this.relayConnections.get(targetPeerId);
+        
+        if (targetSocket) {
+          targetSocket.emit('relay-answer', { answer, fromPeerId });
+          this.logger.debug(`🔄 Relaying answer from ${fromPeerId} to ${targetPeerId}`);
+        }
+      });
+
+      socket.on('relay-ice-candidate', (data) => {
+        const { targetPeerId, candidate, fromPeerId } = data;
+        const targetSocket = this.relayConnections.get(targetPeerId);
+        
+        if (targetSocket) {
+          targetSocket.emit('relay-ice-candidate', { candidate, fromPeerId });
+          this.logger.debug(`🧊 Relaying ICE candidate from ${fromPeerId} to ${targetPeerId}`);
+        }
+      });
+
+      socket.on('disconnect', () => {
+        const socketPeerId = (socket as any).peerId;
+        if (socketPeerId) {
+          this.relayConnections.delete(socketPeerId);
+          this.logger.debug(`📡 Relay disconnected for peer: ${socketPeerId}`);
+        }
+      });
+    });
+  }
+
   async start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const server = this.app.listen(this.port, '0.0.0.0', () => {
-        this.logger.info(`🌍 DIG Bootstrap Server started on port ${this.port}`);
+      this.server.listen(this.port, '0.0.0.0', () => {
+        this.logger.info(`🌍 DIG Bootstrap Server with TURN relay started on port ${this.port}`);
         this.logger.info(`📡 Registration endpoint: http://0.0.0.0:${this.port}/register`);
         this.logger.info(`🔍 Discovery endpoint: http://0.0.0.0:${this.port}/peers`);
         this.logger.info(`📊 Stats endpoint: http://0.0.0.0:${this.port}/stats`);
+        this.logger.info(`🔄 WebSocket relay server: ws://0.0.0.0:${this.port}/socket.io/`);
         resolve();
       });
 
-      server.on('error', (error) => {
+      this.server.on('error', (error) => {
         this.logger.error('Failed to start bootstrap server:', error);
         reject(error);
       });

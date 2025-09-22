@@ -53,6 +53,20 @@ export class DIGNode {
         this.validateConfig(config);
         this.digPath = config.digPath || join(homedir(), '.dig');
     }
+    // Get bootstrap server hostname for TURN configuration
+    getBootstrapServerHost() {
+        if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
+            const url = this.config.discoveryServers[0];
+            try {
+                const parsed = new URL(url);
+                return parsed.hostname;
+            }
+            catch (error) {
+                return 'dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com';
+            }
+        }
+        return 'dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com';
+    }
     async start() {
         if (this.isStarted) {
             throw new Error('DIG Node is already started');
@@ -113,11 +127,16 @@ export class DIGNode {
                             iceServers: [
                                 { urls: ['stun:stun.l.google.com:19302'] },
                                 { urls: ['stun:stun1.l.google.com:19302'] },
-                                { urls: ['stun:stun2.l.google.com:19302'] },
-                                { urls: ['stun:global.stun.twilio.com:3478'] }
+                                { urls: ['stun:global.stun.twilio.com:3478'] },
+                                // Use our bootstrap server as TURN server
+                                {
+                                    urls: [`turn:${this.getBootstrapServerHost()}:3478`],
+                                    username: 'dig-network',
+                                    credential: 'dig-network-turn'
+                                }
                             ]
                         }
-                    }), // WebRTC with STUN servers for NAT traversal
+                    }), // WebRTC with STUN/TURN servers for NAT traversal
                     circuitRelayTransport() // Circuit relay for fallback
                 ],
                 connectionEncrypters: [noise()],
