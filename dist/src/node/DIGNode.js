@@ -13,6 +13,8 @@ import { uPnPNAT } from '@libp2p/upnp-nat';
 import { autoNAT } from '@libp2p/autonat';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { webRTC } from '@libp2p/webrtc';
+import { webSockets } from '@libp2p/websockets';
+import { all } from '@libp2p/websockets/filters';
 import { toString as uint8ArrayToString } from 'uint8arrays/to-string';
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string';
 import { randomBytes } from 'crypto';
@@ -99,12 +101,23 @@ export class DIGNode {
                 addresses: {
                     listen: [
                         `/ip4/0.0.0.0/tcp/${this.config.port || 0}`,
-                        `/ip6/::/tcp/${this.config.port || 0}` // Also listen on IPv6
+                        `/ip6/::/tcp/${this.config.port || 0}`,
+                        `/ip4/0.0.0.0/tcp/${(this.config.port || 0) + 1}/ws` // WebSocket for NAT traversal
                     ]
                 },
                 transports: [
                     tcp(),
-                    webRTC(), // WebRTC for NAT traversal
+                    webSockets({ filter: all }), // WebSockets for NAT traversal
+                    webRTC({
+                        rtcConfiguration: {
+                            iceServers: [
+                                { urls: ['stun:stun.l.google.com:19302'] },
+                                { urls: ['stun:stun1.l.google.com:19302'] },
+                                { urls: ['stun:stun2.l.google.com:19302'] },
+                                { urls: ['stun:global.stun.twilio.com:3478'] }
+                            ]
+                        }
+                    }), // WebRTC with STUN servers for NAT traversal
                     circuitRelayTransport() // Circuit relay for fallback
                 ],
                 connectionEncrypters: [noise()],
@@ -117,7 +130,8 @@ export class DIGNode {
                 },
                 connectionManager: {
                     maxConnections: 100,
-                    dialTimeout: 30000 // Increase dial timeout for NAT traversal
+                    dialTimeout: 60000, // Increase to 60s for NAT traversal
+                    maxParallelDials: 10
                 }
             });
             await this.node.handle(DIG_PROTOCOL, this.handleDIGRequest.bind(this));
@@ -931,15 +945,23 @@ export class DIGNode {
                     this.logger.debug(`⏭️ Already connected to peer: ${peerIdFromAddr}`);
                     continue;
                 }
-                // Attempt connection with timeout
+                // Attempt connection with multiple strategies for NAT traversal
                 this.logger.info(`🔗 Dialing peer: ${peerIdFromAddr} at ${address}`);
                 const addr = multiaddr(address);
-                const connection = await Promise.race([
-                    this.node.dial(addr),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout after 10s')), 10000))
-                ]);
+                let connection = null;
+                try {
+                    // Direct connection attempt with longer timeout for NAT
+                    connection = await Promise.race([
+                        this.node.dial(addr),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout after 30s')), 30000))
+                    ]);
+                }
+                catch (directError) {
+                    this.logger.warn(`Direct connection failed: ${directError instanceof Error ? directError.message : directError}`);
+                    // Connection will be null, handled below
+                }
                 if (!connection || typeof connection !== 'object' || !('remotePeer' in connection)) {
-                    throw new Error('Invalid connection object returned');
+                    throw new Error('All connection attempts failed - NAT traversal unsuccessful');
                 }
                 const typedConnection = connection;
                 const peerIdFromConn = typedConnection.remotePeer.toString();
