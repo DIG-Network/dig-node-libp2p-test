@@ -1000,7 +1000,16 @@ export class DIGNode {
         } catch (error) {
           this.logger.debug('Periodic peer connection failed:', error)
         }
-      }, 60000) // Every minute
+      }, 30000) // Every 30 seconds (more frequent)
+
+      // Also try connecting immediately after discovery
+      setTimeout(async () => {
+        try {
+          await this.connectToDiscoveredPeers()
+        } catch (error) {
+          this.logger.debug('Initial peer connection failed:', error)
+        }
+      }, 10000) // After 10 seconds
       
     } catch (error) {
       this.logger.warn('Failed to start global discovery:', error)
@@ -1032,16 +1041,19 @@ export class DIGNode {
         }
         
         // Attempt connection with timeout
+        this.logger.info(`🔗 Dialing peer: ${peerIdFromAddr} at ${address}`)
+        
         const connection = await Promise.race([
-          this.node.dial(address as any),
+          (this.node as any).dial(address),
           new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Connection timeout')), 10000)
+            setTimeout(() => reject(new Error('Connection timeout after 10s')), 10000)
           )
         ]) as any
         
         const peerIdFromConn = connection.remotePeer.toString()
         this.logger.info(`🌍 Successfully connected to discovered peer: ${peerIdFromConn}`)
         this.logger.info(`📡 Connection address: ${address}`)
+        this.logger.info(`🔗 Connection established, remote peer: ${peerIdFromConn}`)
         
       } catch (error) {
         this.logger.warn(`❌ Failed to connect to ${address}:`, error instanceof Error ? error.message : error)
@@ -1078,7 +1090,7 @@ export class DIGNode {
 
     try {
       this.logger.info(`🔗 Connecting to peer: ${peerAddress}`)
-      const connection = await this.node.dial(peerAddress as any)
+      const connection = await (this.node as any).dial(peerAddress)
       this.logger.info(`✅ Connected to peer: ${connection.remotePeer.toString()}`)
     } catch (error) {
       this.logger.error(`❌ Failed to connect to peer ${peerAddress}:`, error)
