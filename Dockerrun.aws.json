@@ -1,0 +1,14 @@
+{
+  "AWSEBDockerrunVersion": "1",
+  "Image": {
+    "Name": "752233440971.dkr.ecr.us-east-1.amazonaws.com/dig-network/bootstrap:latest",
+    "Update": "true"
+  },
+  "Ports": [
+    {
+      "ContainerPort": 3000
+    }
+  ],
+  "Volumes": [],
+  "Logging": "/var/log/dig-bootstrap"
+}

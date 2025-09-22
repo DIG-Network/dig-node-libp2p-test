@@ -260,6 +260,66 @@ export class DIGGateway {
         });
       }
     });
+
+    // Manual peer connection endpoint
+    this.app.post('/connect', async (req, res) => {
+      const { peerAddress } = req.body;
+      
+      if (!peerAddress || typeof peerAddress !== 'string') {
+        res.status(400).json({ 
+          error: 'peerAddress is required',
+          example: '/ip4/192.168.1.100/tcp/4001/p2p/12D3KooW...'
+        });
+        return;
+      }
+
+      try {
+        await this.digNode.connectToPeer(peerAddress);
+        res.json({
+          success: true,
+          message: `Connected to peer: ${peerAddress}`,
+          connectionInfo: this.digNode.getConnectionInfo()
+        });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          error: error instanceof Error ? error.message : 'Connection failed',
+          peerAddress
+        });
+      }
+    });
+
+    // Get connection information
+    this.app.get('/connections', (req, res) => {
+      try {
+        const connectionInfo = this.digNode.getConnectionInfo();
+        res.json({
+          ...connectionInfo,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+    // Force peer discovery
+    this.app.post('/discover', async (req, res) => {
+      try {
+        await this.digNode.discoverAllPeers();
+        res.json({
+          success: true,
+          message: 'Peer discovery initiated',
+          connectionInfo: this.digNode.getConnectionInfo()
+        });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          error: error instanceof Error ? error.message : 'Discovery failed'
+        });
+      }
+    });
   }
 
   private parseURN(urn: string): { storeId: string; filePath: string; rootHash?: string } | null {

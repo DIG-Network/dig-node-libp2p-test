@@ -24,6 +24,11 @@ export interface DIGNodeConfig {
   privateKey?: string;
   bootstrapPeers?: string[];
   port?: number;
+  connectToPeers?: string[]; // Manual peer connections
+  enableMdns?: boolean;
+  enableDht?: boolean;
+  discoveryServers?: string[]; // Custom bootstrap/discovery servers
+  enableGlobalDiscovery?: boolean;
 }
 
 export interface DIGRequest {

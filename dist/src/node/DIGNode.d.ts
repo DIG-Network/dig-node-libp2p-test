@@ -14,6 +14,7 @@ export declare class DIGNode {
     private isStarted;
     private logger;
     private startTime;
+    private globalDiscovery;
     private requestCounts;
     private readonly MAX_REQUESTS_PER_MINUTE;
     private metrics;
@@ -53,4 +54,10 @@ export declare class DIGNode {
     private discoverPeerStores;
     private syncStores;
     private downloadStoreFromPeers;
+    private startGlobalDiscovery;
+    private connectToDiscoveredPeers;
+    private connectToConfiguredPeers;
+    connectToPeer(peerAddress: string): Promise<void>;
+    getConnectionInfo(): any;
+    discoverAllPeers(): Promise<void>;
 }

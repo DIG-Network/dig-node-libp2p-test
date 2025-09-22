@@ -17,6 +17,7 @@ import { homedir } from 'os';
 import { DIG_PROTOCOL, DIG_DISCOVERY_PROTOCOL } from './types';
 import { generateCryptoIPv6, parseURN } from './utils';
 import { Logger } from './logger';
+import { GlobalDiscovery } from './GlobalDiscovery';
 export class DIGNode {
     constructor(config = {}) {
         this.config = config;
@@ -57,25 +58,43 @@ export class DIGNode {
             this.logger.info(`🌐 Crypto IPv6: ${this.cryptoIPv6}`);
             this.logger.info(`📁 DIG Path: ${this.digPath}`);
             this.logger.debug(`🔧 Config:`, this.config);
+            const peerDiscoveryServices = [];
+            // Add bootstrap discovery if configured
+            if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
+                peerDiscoveryServices.push(bootstrap({
+                    list: this.config.bootstrapPeers
+                }));
+            }
+            // Add mDNS for local network discovery (can be disabled)
+            if (this.config.enableMdns !== false) {
+                peerDiscoveryServices.push(mdns());
+            }
+            const services = {
+                ping: ping(),
+                identify: identify()
+            };
+            // Add DHT service if enabled (default: true)
+            if (this.config.enableDht !== false) {
+                services.dht = kadDHT({
+                    clientMode: false, // Run as DHT server
+                    validators: {},
+                    selectors: {}
+                });
+            }
             this.node = await createLibp2p({
                 addresses: {
-                    listen: [`/ip4/0.0.0.0/tcp/${this.config.port || 0}`]
+                    listen: [
+                        `/ip4/0.0.0.0/tcp/${this.config.port || 0}`,
+                        `/ip6/::/tcp/${this.config.port || 0}` // Also listen on IPv6
+                    ]
                 },
                 transports: [tcp()],
                 connectionEncrypters: [noise()],
                 streamMuxers: [yamux()],
-                peerDiscovery: [
-                    bootstrap({
-                        list: this.config.bootstrapPeers || [
-                            '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN'
-                        ]
-                    }),
-                    mdns()
-                ],
-                services: {
-                    dht: kadDHT(),
-                    ping: ping(),
-                    identify: identify()
+                peerDiscovery: peerDiscoveryServices,
+                services,
+                connectionManager: {
+                    maxConnections: 100
                 }
             });
             await this.node.handle(DIG_PROTOCOL, this.handleDIGRequest.bind(this));
@@ -85,6 +104,8 @@ export class DIGNode {
             await this.startFileWatcher();
             this.startPeerDiscovery();
             this.startStoreSync();
+            await this.startGlobalDiscovery();
+            await this.connectToConfiguredPeers();
             this.isStarted = true;
             console.log(`✅ DIG Node started successfully`);
             console.log(`🆔 Peer ID: ${this.node.peerId.toString()}`);
@@ -112,6 +133,14 @@ export class DIGNode {
         if (this.syncInterval) {
             clearInterval(this.syncInterval);
             this.syncInterval = null;
+        }
+        if (this.globalDiscovery) {
+            try {
+                await this.globalDiscovery.stop();
+            }
+            catch (error) {
+                this.logger.warn('Error stopping global discovery:', error);
+            }
         }
         if (this.watcher) {
             try {
@@ -822,6 +851,128 @@ export class DIGNode {
             }
         }
         console.warn(`❌ Failed to download store ${storeId} from all available peers`);
+    }
+    // Start global discovery system
+    async startGlobalDiscovery() {
+        try {
+            const addresses = this.node.getMultiaddrs().map(addr => addr.toString());
+            this.globalDiscovery = new GlobalDiscovery(this.node.peerId.toString(), addresses, this.cryptoIPv6, () => this.getAvailableStores(), this.config.discoveryServers);
+            await this.globalDiscovery.start();
+            // Also announce to DHT for global discovery
+            const dht = this.node.services.dht;
+            if (dht) {
+                await this.globalDiscovery.announceToGlobalDHT(dht);
+            }
+            this.logger.info('🌍 Global discovery started');
+            // Periodically try to connect to discovered peers
+            setInterval(async () => {
+                try {
+                    await this.connectToDiscoveredPeers();
+                }
+                catch (error) {
+                    this.logger.debug('Periodic peer connection failed:', error);
+                }
+            }, 60000); // Every minute
+        }
+        catch (error) {
+            this.logger.warn('Failed to start global discovery:', error);
+        }
+    }
+    // Connect to peers discovered through global discovery
+    async connectToDiscoveredPeers() {
+        if (!this.globalDiscovery)
+            return;
+        const knownAddresses = this.globalDiscovery.getKnownPeerAddresses();
+        const currentPeers = new Set(this.node.getPeers().map(p => p.toString()));
+        // Try to connect to new peers
+        for (const address of knownAddresses.slice(0, 10)) { // Limit to 10 attempts per round
+            try {
+                // Try to connect to the address (skip if already connected)
+                const connection = await this.node.dial(address);
+                const peerIdFromConn = connection.remotePeer.toString();
+                if (!currentPeers.has(peerIdFromConn)) {
+                    this.logger.info(`🌍 Connected to discovered peer: ${peerIdFromConn}`);
+                }
+            }
+            catch (error) {
+                this.logger.debug(`Failed to connect to discovered peer ${address}:`, error);
+            }
+        }
+    }
+    // Connect to manually configured peers
+    async connectToConfiguredPeers() {
+        if (!this.config.connectToPeers || this.config.connectToPeers.length === 0) {
+            return;
+        }
+        this.logger.info(`🔗 Connecting to ${this.config.connectToPeers.length} configured peers...`);
+        for (const peerAddr of this.config.connectToPeers) {
+            try {
+                await this.connectToPeer(peerAddr);
+            }
+            catch (error) {
+                this.logger.warn(`Failed to connect to peer ${peerAddr}:`, error);
+            }
+        }
+    }
+    // Manually connect to a peer
+    async connectToPeer(peerAddress) {
+        if (!this.isStarted) {
+            throw new Error('DIG Node is not started');
+        }
+        try {
+            this.logger.info(`🔗 Connecting to peer: ${peerAddress}`);
+            const connection = await this.node.dial(peerAddress);
+            this.logger.info(`✅ Connected to peer: ${connection.remotePeer.toString()}`);
+        }
+        catch (error) {
+            this.logger.error(`❌ Failed to connect to peer ${peerAddress}:`, error);
+            throw error;
+        }
+    }
+    // Get connection information for debugging
+    getConnectionInfo() {
+        if (!this.node) {
+            return { error: 'Node not started' };
+        }
+        const peers = this.node.getPeers();
+        const addresses = this.node.getMultiaddrs();
+        return {
+            listeningAddresses: addresses.map(addr => addr.toString()),
+            connectedPeers: peers.map(peer => peer.toString()),
+            peerCount: peers.length,
+            discoveredPeers: Array.from(this.discoveredPeers),
+            peerStores: Object.fromEntries(Array.from(this.peerStores.entries()).map(([peerId, stores]) => [
+                peerId, Array.from(stores)
+            ]))
+        };
+    }
+    // Force peer discovery across the network
+    async discoverAllPeers() {
+        if (!this.isStarted) {
+            throw new Error('DIG Node is not started');
+        }
+        this.logger.info('🔍 Starting manual peer discovery...');
+        try {
+            // Use DHT to find peers
+            const dht = this.node.services.dht;
+            if (dht && dht.getClosestPeers) {
+                const randomKey = randomBytes(32);
+                for await (const peer of dht.getClosestPeers(randomKey)) {
+                    try {
+                        if (peer.toString() !== this.node.peerId.toString()) {
+                            await this.node.dial(peer);
+                            this.logger.info(`🤝 Discovered and connected to peer: ${peer.toString()}`);
+                        }
+                    }
+                    catch (error) {
+                        this.logger.debug(`Could not connect to discovered peer ${peer.toString()}:`, error);
+                    }
+                }
+            }
+        }
+        catch (error) {
+            this.logger.warn('DHT peer discovery failed:', error);
+        }
     }
 }
 //# sourceMappingURL=DIGNode.js.map

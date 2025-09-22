@@ -17,6 +17,11 @@ export interface DIGNodeConfig {
     privateKey?: string;
     bootstrapPeers?: string[];
     port?: number;
+    connectToPeers?: string[];
+    enableMdns?: boolean;
+    enableDht?: boolean;
+    discoveryServers?: string[];
+    enableGlobalDiscovery?: boolean;
 }
 export interface DIGRequest {
     type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT';

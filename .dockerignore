@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build outputs (will be built in container)
+dist
+
+# Development files
+*.md
+.git
+.gitignore
+.env*
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+coverage
+*.test.js
+*.test.ts
+
+# Documentation
+docs
+examples/*.md
+
+# Terraform files (not needed in container)
+terraform
+*.tf
+*.tfstate*
+.terraform*
+
+# AWS files
+.aws
+
+# Logs
+logs
+*.log
