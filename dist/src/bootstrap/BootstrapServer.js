@@ -20,6 +20,7 @@ export class BootstrapServer {
         this.PEER_TIMEOUT = 10 * 60 * 1000; // 10 minutes
         this.MAX_PEERS = 10000; // Limit for scalability
         this.relayConnections = new Map(); // Active relay connections
+        this.turnServers = new Map(); // Available TURN servers
         this.setupRoutes();
         this.setupRelayServer();
         this.startCleanupTask();
@@ -413,6 +414,124 @@ export class BootstrapServer {
                 this.logger.error('Store relay error:', error);
                 res.status(500).json({
                     error: 'Failed to relay store'
+                });
+            }
+        });
+        // Test TURN capability of a node
+        this.app.post('/test-turn-capability', async (req, res) => {
+            try {
+                const { peerId, testAddress, turnPort } = req.body;
+                if (!peerId || !testAddress || !turnPort) {
+                    res.status(400).json({
+                        error: 'peerId, testAddress, and turnPort are required'
+                    });
+                    return;
+                }
+                // Extract IP from the test address
+                const ipMatch = testAddress.match(/\/ip4\/([^\/]+)\//);
+                if (!ipMatch) {
+                    res.json({
+                        turnCapable: false,
+                        reason: 'Invalid address format'
+                    });
+                    return;
+                }
+                const ip = ipMatch[1];
+                // Test if we can connect to the node's TURN port
+                try {
+                    const testUrl = `http://${ip}:${turnPort}/turn-test`;
+                    const testResponse = await fetch(testUrl, {
+                        method: 'GET',
+                        signal: AbortSignal.timeout(5000)
+                    });
+                    const turnCapable = testResponse.ok;
+                    res.json({
+                        turnCapable,
+                        testedAddress: `${ip}:${turnPort}`,
+                        reason: turnCapable ? 'Connection successful' : `HTTP ${testResponse.status}`
+                    });
+                    this.logger.info(`🧪 TURN test for ${peerId}: ${turnCapable ? 'CAPABLE' : 'NOT CAPABLE'}`);
+                }
+                catch (testError) {
+                    res.json({
+                        turnCapable: false,
+                        reason: 'Connection failed',
+                        error: testError instanceof Error ? testError.message : 'Unknown error'
+                    });
+                }
+            }
+            catch (error) {
+                res.status(500).json({
+                    error: 'TURN capability test failed'
+                });
+            }
+        });
+        // Register a node as TURN server
+        this.app.post('/register-turn-server', (req, res) => {
+            try {
+                const { peerId, turnAddresses, turnPort, capacity, region } = req.body;
+                if (!peerId || !turnAddresses || !turnPort) {
+                    res.status(400).json({
+                        error: 'peerId, turnAddresses, and turnPort are required'
+                    });
+                    return;
+                }
+                const turnServer = {
+                    peerId,
+                    addresses: turnAddresses,
+                    port: turnPort,
+                    capacity: capacity || 10,
+                    currentLoad: 0,
+                    region: region || 'unknown',
+                    lastSeen: Date.now()
+                };
+                this.turnServers.set(peerId, turnServer);
+                // Also mark the peer as TURN capable
+                const peer = this.peers.get(peerId);
+                if (peer) {
+                    peer.turnCapable = true;
+                    peer.turnAddresses = turnAddresses;
+                    peer.turnPort = turnPort;
+                    peer.turnCapacity = capacity;
+                    peer.turnLoad = 0;
+                }
+                this.logger.info(`📡 Registered TURN server: ${peerId} (capacity: ${capacity})`);
+                res.json({
+                    success: true,
+                    message: 'TURN server registered',
+                    peerId,
+                    capacity
+                });
+            }
+            catch (error) {
+                res.status(500).json({
+                    error: 'Failed to register TURN server'
+                });
+            }
+        });
+        // Get available TURN servers (round-robin)
+        this.app.get('/turn-servers', (req, res) => {
+            try {
+                const now = Date.now();
+                const activeTurnServers = Array.from(this.turnServers.values())
+                    .filter(server => now - server.lastSeen < this.PEER_TIMEOUT)
+                    .sort((a, b) => a.currentLoad - b.currentLoad); // Sort by load for round-robin
+                res.json({
+                    turnServers: activeTurnServers.map(server => ({
+                        peerId: server.peerId,
+                        addresses: server.addresses,
+                        port: server.port,
+                        currentLoad: server.currentLoad,
+                        capacity: server.capacity,
+                        region: server.region
+                    })),
+                    total: activeTurnServers.length,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            catch (error) {
+                res.status(500).json({
+                    error: 'Failed to get TURN servers'
                 });
             }
         });

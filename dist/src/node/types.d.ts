@@ -22,6 +22,8 @@ export interface DIGNodeConfig {
     enableDht?: boolean;
     discoveryServers?: string[];
     enableGlobalDiscovery?: boolean;
+    enableTurnServer?: boolean;
+    turnPort?: number;
 }
 export interface DIGRequest {
     type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT';

@@ -47,11 +47,11 @@ resource "aws_s3_bucket" "eb_bucket" {
 
 # Application version
 resource "aws_elastic_beanstalk_application_version" "dig_bootstrap_version" {
-  name         = "v1.0.3"
+  name         = "v1.0.5"
   application  = aws_elastic_beanstalk_application.dig_bootstrap.name
-  description  = "DIG Network Bootstrap Server v1.0.3 - With TURN/Relay Server"
+  description  = "DIG Network Bootstrap Server v1.0.5 - Distributed TURN Server Network"
   bucket       = aws_s3_bucket.eb_bucket.bucket
-  key          = "bootstrap-app-v4.zip"
+  key          = "bootstrap-app-v6.zip"
 
   depends_on = [aws_s3_bucket.eb_bucket]
 }

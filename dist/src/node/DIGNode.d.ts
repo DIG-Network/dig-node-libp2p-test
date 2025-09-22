@@ -58,8 +58,11 @@ export declare class DIGNode {
     private syncStores;
     private downloadStoreFromPeers;
     private downloadStoreFromLibP2PPeer;
+    private downloadStoreViaTurnServers;
     private startGlobalDiscovery;
     private startWebSocketRelay;
+    private detectTurnCapability;
+    private registerAsTurnServer;
     private connectToDiscoveredPeers;
     private connectToConfiguredPeers;
     connectToPeer(peerAddress: string): Promise<void>;

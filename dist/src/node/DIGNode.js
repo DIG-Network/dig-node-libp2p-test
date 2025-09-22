@@ -194,6 +194,7 @@ export class DIGNode {
             this.startStoreSync();
             await this.startGlobalDiscovery();
             await this.startWebSocketRelay();
+            await this.detectTurnCapability();
             await this.connectToConfiguredPeers();
             this.isStarted = true;
             console.log(`✅ DIG Node started successfully`);
@@ -901,8 +902,18 @@ export class DIGNode {
                 }
             }
         }
-        // 3. LAST RESORT: Use bootstrap server relay only if LibP2P failed
-        console.log(`🔄 LibP2P download failed, trying bootstrap server as last resort...`);
+        // 3. Try available TURN servers (distributed load)
+        console.log(`🔄 LibP2P download failed, trying distributed TURN servers...`);
+        try {
+            await this.downloadStoreViaTurnServers(storeId);
+            console.log(`✅ Downloaded ${storeId} via TURN server network`);
+            return;
+        }
+        catch (turnError) {
+            this.logger.warn(`TURN server download failed: ${turnError}`);
+        }
+        // 4. LAST RESORT: Use bootstrap server relay
+        console.log(`🔄 TURN servers failed, trying bootstrap server as last resort...`);
         try {
             await this.downloadStoreViaBootstrap(storeId);
             console.log(`✅ Downloaded ${storeId} via bootstrap server (last resort)`);
@@ -970,6 +981,72 @@ export class DIGNode {
         else {
             throw new Error('No content received from LibP2P peer');
         }
+    }
+    // Download store via distributed TURN servers
+    async downloadStoreViaTurnServers(storeId) {
+        const bootstrapUrl = this.config.discoveryServers?.[0];
+        if (!bootstrapUrl) {
+            throw new Error('No bootstrap server configured');
+        }
+        // Get available TURN servers
+        const turnResponse = await fetch(`${bootstrapUrl}/turn-servers`);
+        if (!turnResponse.ok) {
+            throw new Error('Failed to get TURN servers');
+        }
+        const turnData = await turnResponse.json();
+        if (!turnData.turnServers || turnData.turnServers.length === 0) {
+            throw new Error('No TURN servers available');
+        }
+        this.logger.info(`🔄 Found ${turnData.turnServers.length} available TURN servers`);
+        // Try each TURN server in order of lowest load
+        for (const turnServer of turnData.turnServers) {
+            try {
+                this.logger.info(`📡 Trying TURN server: ${turnServer.peerId} (load: ${turnServer.currentLoad}/${turnServer.capacity})`);
+                // Find which peer has the store
+                const peersResponse = await fetch(`${bootstrapUrl}/peers?includeStores=true`);
+                if (!peersResponse.ok)
+                    continue;
+                const peersData = await peersResponse.json();
+                const sourcePeer = peersData.peers.find((p) => p.peerId !== this.node.peerId.toString() &&
+                    p.stores &&
+                    p.stores.includes(storeId));
+                if (!sourcePeer)
+                    continue;
+                // Request download via this TURN server
+                const downloadResponse = await fetch(`${bootstrapUrl}/relay-store`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        fromPeerId: sourcePeer.peerId,
+                        toPeerId: this.node.peerId.toString(),
+                        storeId: storeId,
+                        turnServerId: turnServer.peerId // Use specific TURN server
+                    })
+                });
+                if (downloadResponse.ok) {
+                    const storeContent = await downloadResponse.arrayBuffer();
+                    // Save the downloaded store
+                    const filePath = join(this.digPath, `${storeId}.dig`);
+                    await writeFile(filePath, Buffer.from(storeContent));
+                    // Load it into our stores
+                    await this.loadDIGFile(filePath);
+                    if (this.digFiles.has(storeId)) {
+                        await this.announceStore(storeId);
+                        this.metrics.downloadSuccesses++;
+                        this.metrics.filesShared++;
+                        this.logger.info(`✅ Downloaded store ${storeId} via TURN server ${turnServer.peerId} (${storeContent.byteLength} bytes)`);
+                        return; // Success
+                    }
+                }
+            }
+            catch (error) {
+                this.logger.warn(`TURN server ${turnServer.peerId} failed:`, error);
+                continue; // Try next TURN server
+            }
+        }
+        throw new Error('All TURN servers failed');
     }
     // Start global discovery system
     async startGlobalDiscovery() {
@@ -1039,6 +1116,93 @@ export class DIGNode {
         }
         catch (error) {
             this.logger.warn('Failed to connect to WebSocket relay:', error);
+        }
+    }
+    // Detect if this node can act as a TURN server
+    async detectTurnCapability() {
+        if (!this.config.discoveryServers || this.config.discoveryServers.length === 0) {
+            return;
+        }
+        try {
+            const bootstrapUrl = this.config.discoveryServers[0];
+            const addresses = this.node.getMultiaddrs();
+            // Find external IP addresses (not localhost or private)
+            const externalAddresses = addresses.filter(addr => {
+                const addrStr = addr.toString();
+                return !addrStr.includes('127.0.0.1') &&
+                    !addrStr.includes('::1') &&
+                    !addrStr.includes('192.168.') &&
+                    !addrStr.includes('10.0.') &&
+                    !addrStr.includes('172.16.') &&
+                    !addrStr.includes('172.17.') &&
+                    !addrStr.includes('172.18.') &&
+                    !addrStr.includes('172.19.') &&
+                    !addrStr.includes('172.2') &&
+                    !addrStr.includes('172.3');
+            });
+            if (externalAddresses.length === 0) {
+                this.logger.info('🔒 Node behind NAT - cannot act as TURN server');
+                return;
+            }
+            // Test if bootstrap server can connect back to us
+            const testAddress = externalAddresses[0].toString();
+            const testResponse = await fetch(`${bootstrapUrl}/test-turn-capability`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    peerId: this.node.peerId.toString(),
+                    testAddress: testAddress,
+                    turnPort: this.config.turnPort || (this.config.port || 4001) + 100
+                }),
+                signal: AbortSignal.timeout(15000)
+            });
+            if (testResponse.ok) {
+                const result = await testResponse.json();
+                if (result.turnCapable) {
+                    this.logger.info('🌟 Node is TURN-capable - can relay for other nodes');
+                    await this.registerAsTurnServer();
+                }
+                else {
+                    this.logger.info('🔒 Node behind NAT - cannot act as TURN server');
+                }
+            }
+        }
+        catch (error) {
+            this.logger.warn('TURN capability detection failed:', error);
+        }
+    }
+    // Register this node as a TURN server
+    async registerAsTurnServer() {
+        try {
+            const bootstrapUrl = this.config.discoveryServers?.[0];
+            if (!bootstrapUrl)
+                return;
+            const addresses = this.node.getMultiaddrs();
+            const externalAddresses = addresses.filter(addr => {
+                const addrStr = addr.toString();
+                return !addrStr.includes('127.0.0.1') && !addrStr.includes('::1');
+            });
+            const response = await fetch(`${bootstrapUrl}/register-turn-server`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    peerId: this.node.peerId.toString(),
+                    turnAddresses: externalAddresses.map(addr => addr.toString()),
+                    turnPort: this.config.turnPort || (this.config.port || 4001) + 100,
+                    capacity: 10, // Max concurrent relay connections
+                    region: 'auto' // Auto-detect region
+                })
+            });
+            if (response.ok) {
+                this.logger.info('📡 Registered as TURN server for the network');
+            }
+        }
+        catch (error) {
+            this.logger.warn('Failed to register as TURN server:', error);
         }
     }
     // Connect to peers discovered through global discovery

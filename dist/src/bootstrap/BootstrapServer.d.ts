@@ -9,6 +9,7 @@ export declare class BootstrapServer {
     private readonly PEER_TIMEOUT;
     private readonly MAX_PEERS;
     private relayConnections;
+    private turnServers;
     constructor(port?: number);
     private setupRoutes;
     private groupBy;

@@ -29,6 +29,8 @@ export interface DIGNodeConfig {
   enableDht?: boolean;
   discoveryServers?: string[]; // Custom bootstrap/discovery servers
   enableGlobalDiscovery?: boolean;
+  enableTurnServer?: boolean; // Act as TURN server for other nodes
+  turnPort?: number; // Port for TURN server functionality
 }
 
 export interface DIGRequest {
