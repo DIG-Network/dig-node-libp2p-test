@@ -21,6 +21,7 @@ export declare class DIGNode {
     private metrics;
     constructor(config?: DIGNodeConfig);
     private getBootstrapServerHost;
+    private createCircuitRelayAddress;
     start(): Promise<void>;
     stop(): Promise<void>;
     private cleanup;
@@ -68,5 +69,7 @@ export declare class DIGNode {
     private handleRelayOffer;
     private discoverPeerStoresViaRelay;
     private downloadStoreViaRelay;
+    private syncStoresViaBootstrap;
+    private downloadStoreViaBootstrap;
     discoverAllPeers(): Promise<void>;
 }

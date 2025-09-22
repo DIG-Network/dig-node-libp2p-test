@@ -37,19 +37,19 @@ export class GlobalDiscovery {
     // Register with discovery servers
     await this.registerWithDiscoveryServers()
     
-    // Start periodic registration (every 5 minutes)
+    // Start periodic registration (every 2 minutes for faster updates)
     this.registrationInterval = setInterval(() => {
       this.registerWithDiscoveryServers().catch(error => {
         this.logger.warn('Registration failed:', error)
       })
-    }, 5 * 60 * 1000)
+    }, 2 * 60 * 1000)
     
-    // Start periodic peer discovery (every 2 minutes)
+    // Start periodic peer discovery (every 30 seconds for faster peer updates)
     this.discoveryInterval = setInterval(() => {
       this.discoverPeers().catch(error => {
         this.logger.warn('Peer discovery failed:', error)
       })
-    }, 2 * 60 * 1000)
+    }, 30 * 1000)
     
     // Initial peer discovery
     setTimeout(() => this.discoverPeers(), 5000)

@@ -68,6 +68,37 @@ export class DIGNode {
         }
         return 'dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com';
     }
+    // Create circuit relay address for NAT traversal
+    createCircuitRelayAddress(originalAddress) {
+        try {
+            // Extract the peer ID from the original address
+            const peerIdMatch = originalAddress.match(/\/p2p\/([^\/]+)$/);
+            if (!peerIdMatch)
+                return null;
+            const targetPeerId = peerIdMatch[1];
+            // Use LibP2P public relay nodes for circuit relay
+            const relayNodes = [
+                '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+                '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+                '/ip4/147.75.77.187/tcp/4001/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN'
+            ];
+            // Try each relay node
+            for (const relayNode of relayNodes) {
+                const relayPeerIdMatch = relayNode.match(/\/p2p\/([^\/]+)$/);
+                if (relayPeerIdMatch) {
+                    const relayPeerId = relayPeerIdMatch[1];
+                    // Create circuit relay address: /relay-node/p2p-circuit/target-peer
+                    const circuitAddress = `${relayNode}/p2p-circuit/p2p/${targetPeerId}`;
+                    return circuitAddress;
+                }
+            }
+            return null;
+        }
+        catch (error) {
+            this.logger.warn('Failed to create circuit relay address:', error);
+            return null;
+        }
+    }
     async start() {
         if (this.isStarted) {
             throw new Error('DIG Node is already started');
@@ -809,12 +840,9 @@ export class DIGNode {
             for (const peer of connectedPeers) {
                 await this.discoverPeerStores(peer.toString());
             }
-            // Discover stores from relay-connected peers
-            for (const peerId of relayPeers) {
-                if (!connectedPeers.find(p => p.toString() === peerId)) {
-                    await this.discoverPeerStoresViaRelay(peerId);
-                }
-            }
+            // Always try to sync stores from all discovered peers via bootstrap server
+            // This works even without direct LibP2P connections
+            await this.syncStoresViaBootstrap();
             // Find missing stores
             const allRemoteStores = new Set();
             for (const [peerId, stores] of this.peerStores) {
@@ -1012,6 +1040,11 @@ export class DIGNode {
                 // Extract peer ID from address string (multiaddr format: .../p2p/PEER_ID)
                 const peerIdMatch = address.match(/\/p2p\/([^\/]+)$/);
                 const peerIdFromAddr = peerIdMatch ? peerIdMatch[1] : null;
+                // Skip if this is our own peer ID
+                if (peerIdFromAddr === this.node.peerId.toString()) {
+                    this.logger.debug(`⏭️ Skipping self-connection attempt: ${peerIdFromAddr}`);
+                    continue;
+                }
                 // Skip if we're already connected to this peer
                 if (peerIdFromAddr && currentPeers.has(peerIdFromAddr)) {
                     this.logger.debug(`⏭️ Already connected to peer: ${peerIdFromAddr}`);
@@ -1030,16 +1063,21 @@ export class DIGNode {
                 }
                 catch (directError) {
                     this.logger.warn(`Direct connection failed: ${directError instanceof Error ? directError.message : directError}`);
-                    // Try WebSocket relay fallback
-                    if (this.webSocketRelay && this.webSocketRelay.isConnected() && peerIdFromAddr) {
-                        try {
-                            this.logger.info(`🔄 Attempting WebSocket relay connection to: ${peerIdFromAddr}`);
-                            connection = await this.connectViaRelay(peerIdFromAddr);
-                            this.logger.info(`🌐 Successfully connected via WebSocket relay`);
+                    // Try circuit relay connection - this creates a REAL LibP2P connection
+                    try {
+                        this.logger.info(`🔄 Attempting circuit relay connection to: ${peerIdFromAddr}`);
+                        const relayAddr = this.createCircuitRelayAddress(address);
+                        if (relayAddr) {
+                            const relayMultiaddr = multiaddr(relayAddr);
+                            connection = await Promise.race([
+                                this.node.dial(relayMultiaddr),
+                                new Promise((_, reject) => setTimeout(() => reject(new Error('Circuit relay timeout')), 45000))
+                            ]);
+                            this.logger.info(`🌐 Successfully connected via circuit relay`);
                         }
-                        catch (relayError) {
-                            this.logger.warn(`WebSocket relay connection failed: ${relayError instanceof Error ? relayError.message : relayError}`);
-                        }
+                    }
+                    catch (relayError) {
+                        this.logger.warn(`Circuit relay connection failed: ${relayError instanceof Error ? relayError.message : relayError}`);
                     }
                 }
                 if (!connection || typeof connection !== 'object' || !('remotePeer' in connection)) {
@@ -1290,6 +1328,99 @@ export class DIGNode {
         }
         catch (error) {
             this.logger.warn(`Failed to download store ${storeId} via relay:`, error);
+        }
+    }
+    // Sync stores via bootstrap server (works without direct LibP2P connections)
+    async syncStoresViaBootstrap() {
+        try {
+            const bootstrapUrl = this.config.discoveryServers?.[0];
+            if (!bootstrapUrl)
+                return;
+            this.logger.info('🔄 Syncing stores via bootstrap server...');
+            // Get all peers and their stores from bootstrap server
+            const response = await fetch(`${bootstrapUrl}/peers?includeStores=true`);
+            if (!response.ok)
+                return;
+            const data = await response.json();
+            const myPeerId = this.node.peerId.toString();
+            // Find all stores from other peers
+            const allRemoteStores = new Set();
+            for (const peer of data.peers) {
+                if (peer.peerId !== myPeerId && peer.stores) {
+                    for (const storeId of peer.stores) {
+                        allRemoteStores.add(storeId);
+                    }
+                    // Update our peer store tracking
+                    this.peerStores.set(peer.peerId, new Set(peer.stores));
+                }
+            }
+            // Find missing stores
+            const missingStores = Array.from(allRemoteStores).filter(storeId => !this.digFiles.has(storeId));
+            if (missingStores.length > 0) {
+                this.logger.info(`📥 Found ${missingStores.length} missing stores via bootstrap server`);
+                // Download missing stores via bootstrap relay
+                for (const storeId of missingStores) {
+                    await this.downloadStoreViaBootstrap(storeId);
+                }
+            }
+        }
+        catch (error) {
+            this.logger.warn('Bootstrap store sync failed:', error);
+        }
+    }
+    // Download store via bootstrap server relay
+    async downloadStoreViaBootstrap(storeId) {
+        try {
+            this.logger.info(`📥 Downloading store ${storeId} via bootstrap server`);
+            this.metrics.downloadAttempts++;
+            const bootstrapUrl = this.config.discoveryServers?.[0];
+            if (!bootstrapUrl) {
+                throw new Error('No bootstrap server configured');
+            }
+            // Find which peer has this store
+            const peersResponse = await fetch(`${bootstrapUrl}/peers?includeStores=true`);
+            if (!peersResponse.ok) {
+                throw new Error('Failed to get peer list');
+            }
+            const peersData = await peersResponse.json();
+            const sourcePeer = peersData.peers.find((p) => p.peerId !== this.node.peerId.toString() &&
+                p.stores &&
+                p.stores.includes(storeId));
+            if (!sourcePeer) {
+                throw new Error(`No peer found with store ${storeId}`);
+            }
+            // Request store via bootstrap relay
+            const storeResponse = await fetch(`${bootstrapUrl}/relay-store`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    fromPeerId: sourcePeer.peerId,
+                    toPeerId: this.node.peerId.toString(),
+                    storeId: storeId
+                })
+            });
+            if (storeResponse.ok) {
+                const storeContent = await storeResponse.arrayBuffer();
+                // Save the downloaded store
+                const filePath = join(this.digPath, `${storeId}.dig`);
+                await writeFile(filePath, Buffer.from(storeContent));
+                // Load it into our stores
+                await this.loadDIGFile(filePath);
+                if (this.digFiles.has(storeId)) {
+                    await this.announceStore(storeId);
+                    this.metrics.downloadSuccesses++;
+                    this.metrics.filesShared++;
+                    this.logger.info(`✅ Downloaded store ${storeId} via bootstrap relay (${storeContent.byteLength} bytes)`);
+                }
+            }
+            else {
+                throw new Error(`Store download failed: ${storeResponse.status}`);
+            }
+        }
+        catch (error) {
+            this.logger.warn(`Failed to download store ${storeId} via bootstrap:`, error);
         }
     }
     // Force peer discovery across the network

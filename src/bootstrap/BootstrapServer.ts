@@ -529,7 +529,7 @@ export class BootstrapServer {
   }
 
   private startCleanupTask(): void {
-    // Clean up stale peers every 5 minutes
+    // Clean up stale peers every 2 minutes (more frequent for better peer list freshness)
     this.cleanupInterval = setInterval(() => {
       const now = Date.now();
       const initialSize = this.peers.size;
@@ -537,6 +537,10 @@ export class BootstrapServer {
       for (const [peerId, peer] of this.peers) {
         if (now - peer.lastSeen > this.PEER_TIMEOUT) {
           this.peers.delete(peerId);
+          // Also clean up relay connections
+          if (this.relayConnections.has(peerId)) {
+            this.relayConnections.delete(peerId);
+          }
           this.logger.debug(`🧹 Cleaned up stale peer: ${peerId}`);
         }
       }
@@ -545,7 +549,7 @@ export class BootstrapServer {
       if (cleaned > 0) {
         this.logger.info(`🧹 Cleaned up ${cleaned} stale peers (${this.peers.size} remaining)`);
       }
-    }, 5 * 60 * 1000);
+    }, 2 * 60 * 1000);
   }
 
   // Setup WebSocket relay server for NAT traversal
