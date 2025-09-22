@@ -802,10 +802,18 @@ export class DIGNode {
         console.log(`🔄 Starting store synchronization...`);
         try {
             const connectedPeers = this.node.getPeers();
-            console.log(`👥 Connected to ${connectedPeers.length} peers`);
+            const relayPeers = Array.from(this.discoveredPeers); // Include relay-connected peers
+            const totalPeers = connectedPeers.length + relayPeers.length;
+            console.log(`👥 Connected to ${connectedPeers.length} direct peers, ${relayPeers.length} relay peers (${totalPeers} total)`);
             // Discover stores from all connected peers
             for (const peer of connectedPeers) {
                 await this.discoverPeerStores(peer.toString());
+            }
+            // Discover stores from relay-connected peers
+            for (const peerId of relayPeers) {
+                if (!connectedPeers.find(p => p.toString() === peerId)) {
+                    await this.discoverPeerStoresViaRelay(peerId);
+                }
             }
             // Find missing stores
             const allRemoteStores = new Set();
@@ -965,6 +973,26 @@ export class DIGNode {
             this.webSocketRelay = new WebSocketRelay(bootstrapUrl, this.node.peerId.toString());
             await this.webSocketRelay.connect();
             this.logger.info('🔄 WebSocket relay connected for NAT traversal fallback');
+            // Set up store request handler
+            this.webSocketRelay.onMessage('store-request', async (data) => {
+                const { requestId, storeId, fromPeerId } = data;
+                this.logger.info(`📥 Received store request for ${storeId} from ${fromPeerId}`);
+                try {
+                    const digFile = this.digFiles.get(storeId);
+                    if (digFile) {
+                        this.webSocketRelay.sendStoreResponse(requestId, digFile.content);
+                        this.logger.info(`📤 Sent store ${storeId} via relay (${digFile.content.length} bytes)`);
+                    }
+                    else {
+                        this.webSocketRelay.sendStoreResponse(requestId, null, 'Store not found');
+                        this.logger.warn(`❌ Store ${storeId} not found for relay request`);
+                    }
+                }
+                catch (error) {
+                    this.webSocketRelay.sendStoreResponse(requestId, null, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    this.logger.error(`❌ Error handling store request:`, error);
+                }
+            });
         }
         catch (error) {
             this.logger.warn('Failed to connect to WebSocket relay:', error);
@@ -1151,13 +1179,24 @@ export class DIGNode {
             }
             const result = await response.json();
             this.logger.info(`🔄 Relay initiation successful: ${result.message}`);
-            // Return a mock connection object for now
-            // In a full implementation, this would establish a WebRTC connection
+            // Add the peer to our discovered peers manually since relay connection worked
+            this.discoveredPeers.add(targetPeerId);
+            this.logger.info(`📡 Added relay peer to discovered peers: ${targetPeerId}`);
+            // Immediately trigger store discovery for this relay-connected peer
+            try {
+                await this.discoverPeerStoresViaRelay(targetPeerId);
+                this.logger.info(`✅ Store discovery completed for relay peer: ${targetPeerId}`);
+            }
+            catch (error) {
+                this.logger.warn(`Failed to discover stores via relay: ${error}`);
+            }
+            // Return a connection object that indicates relay connection
             return {
                 remotePeer: {
                     toString: () => targetPeerId
                 },
-                relayConnection: true
+                relayConnection: true,
+                isRelay: true
             };
         }
         catch (error) {
@@ -1174,6 +1213,84 @@ export class DIGNode {
             type: 'answer',
             sdp: 'mock-answer-sdp'
         };
+    }
+    // Discover stores from a peer via relay connection
+    async discoverPeerStoresViaRelay(peerId) {
+        try {
+            this.logger.info(`📋 Discovering stores from relay peer: ${peerId}`);
+            // Use the bootstrap server to get peer's store list
+            const bootstrapUrl = this.config.discoveryServers?.[0];
+            if (!bootstrapUrl) {
+                throw new Error('No bootstrap server configured');
+            }
+            const response = await fetch(`${bootstrapUrl}/peers`);
+            if (!response.ok) {
+                throw new Error(`Failed to get peer list: ${response.status}`);
+            }
+            const data = await response.json();
+            const targetPeer = data.peers.find((p) => p.peerId === peerId);
+            if (targetPeer && targetPeer.stores) {
+                const peerStores = new Set(targetPeer.stores);
+                this.peerStores.set(peerId, peerStores);
+                this.logger.info(`📋 Relay peer ${peerId} has ${targetPeer.stores.length} stores`);
+                // Find missing stores and download them via relay
+                const missingStores = targetPeer.stores.filter((storeId) => !this.digFiles.has(storeId));
+                if (missingStores.length > 0) {
+                    this.logger.info(`📥 Found ${missingStores.length} missing stores from relay peer`);
+                    for (const storeId of missingStores) {
+                        await this.downloadStoreViaRelay(peerId, storeId);
+                    }
+                }
+            }
+        }
+        catch (error) {
+            this.logger.warn(`Failed to discover stores via relay from ${peerId}:`, error);
+        }
+    }
+    // Download a store via relay connection
+    async downloadStoreViaRelay(peerId, storeId) {
+        try {
+            this.logger.info(`📥 Downloading store ${storeId} via relay from ${peerId}`);
+            this.metrics.downloadAttempts++;
+            // For now, use the bootstrap server as a simple relay
+            // In a full implementation, this would use the WebSocket relay for data transfer
+            const bootstrapUrl = this.config.discoveryServers?.[0];
+            if (!bootstrapUrl) {
+                throw new Error('No bootstrap server configured');
+            }
+            // Request the bootstrap server to facilitate the transfer
+            const response = await fetch(`${bootstrapUrl}/relay-store`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    fromPeerId: peerId,
+                    toPeerId: this.node.peerId.toString(),
+                    storeId: storeId
+                })
+            });
+            if (response.ok) {
+                const storeData = await response.arrayBuffer();
+                // Save the downloaded store
+                const filePath = join(this.digPath, `${storeId}.dig`);
+                await writeFile(filePath, Buffer.from(storeData));
+                // Load it into our stores
+                await this.loadDIGFile(filePath);
+                if (this.digFiles.has(storeId)) {
+                    await this.announceStore(storeId);
+                    this.metrics.downloadSuccesses++;
+                    this.metrics.filesShared++;
+                    this.logger.info(`✅ Downloaded store ${storeId} via relay (${storeData.byteLength} bytes)`);
+                }
+            }
+            else {
+                this.logger.warn(`Failed to download store ${storeId} via relay: ${response.status}`);
+            }
+        }
+        catch (error) {
+            this.logger.warn(`Failed to download store ${storeId} via relay:`, error);
+        }
     }
     // Force peer discovery across the network
     async discoverAllPeers() {

@@ -389,6 +389,114 @@ export class BootstrapServer {
         });
       }
     });
+
+    // Relay store content between peers
+    this.app.post('/relay-store', async (req, res) => {
+      try {
+        const { fromPeerId, toPeerId, storeId } = req.body;
+        
+        if (!fromPeerId || !toPeerId || !storeId) {
+          res.status(400).json({
+            error: 'fromPeerId, toPeerId, and storeId are required'
+          });
+          return;
+        }
+
+        // Find the source peer
+        const sourcePeer = this.peers.get(fromPeerId);
+        if (!sourcePeer) {
+          res.status(404).json({
+            error: 'Source peer not found',
+            fromPeerId
+          });
+          return;
+        }
+
+        // Check if source peer has the requested store
+        if (!sourcePeer.stores.includes(storeId)) {
+          res.status(404).json({
+            error: 'Store not found on source peer',
+            storeId,
+            fromPeerId
+          });
+          return;
+        }
+
+        // Request the actual store content from the source peer via WebSocket
+        this.logger.info(`🔄 Requesting store ${storeId} from source peer ${fromPeerId} via WebSocket`);
+        
+        const sourceSocket = this.relayConnections.get(fromPeerId);
+        if (!sourceSocket) {
+          res.status(404).json({
+            error: 'Source peer not connected to relay server',
+            fromPeerId
+          });
+          return;
+        }
+
+        // Request store content from source peer via WebSocket
+        const requestId = `store-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        
+        // Set up response handler
+        const responsePromise = new Promise<Buffer>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Store request timeout'));
+          }, 30000);
+
+          const responseHandler = (data: any) => {
+            if (data.requestId === requestId) {
+              clearTimeout(timeout);
+              sourceSocket.off('store-response', responseHandler);
+              
+              if (data.success && data.content) {
+                const storeBuffer = Buffer.from(data.content, 'base64');
+                resolve(storeBuffer);
+              } else {
+                reject(new Error(data.error || 'Store request failed'));
+              }
+            }
+          };
+
+          sourceSocket.on('store-response', responseHandler);
+        });
+
+        // Send store request to source peer
+        sourceSocket.emit('store-request', {
+          requestId,
+          storeId,
+          fromPeerId: toPeerId // Who is requesting
+        });
+
+        try {
+          const storeContent = await responsePromise;
+          
+          res.setHeader('Content-Type', 'application/x-dig-archive');
+          res.setHeader('Content-Length', storeContent.length.toString());
+          res.setHeader('X-Source-Peer', fromPeerId);
+          res.setHeader('X-Store-Id', storeId);
+          res.setHeader('X-Relay-Type', 'content');
+          
+          res.send(storeContent);
+          
+          this.logger.info(`✅ Successfully relayed store ${storeId} from ${fromPeerId} to ${toPeerId} (${storeContent.length} bytes)`);
+          
+        } catch (requestError) {
+          this.logger.error(`Failed to get store ${storeId} from source peer:`, requestError);
+          res.status(500).json({
+            error: 'Failed to retrieve store from source peer',
+            message: requestError instanceof Error ? requestError.message : 'Unknown error',
+            storeId,
+            fromPeerId
+          });
+        }
+
+      } catch (error) {
+        this.logger.error('Store relay error:', error);
+        res.status(500).json({
+          error: 'Failed to relay store'
+        });
+      }
+    });
   }
 
   private groupBy(array: any[], key: string): Record<string, number> {

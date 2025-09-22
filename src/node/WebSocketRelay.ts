@@ -82,6 +82,16 @@ export class WebSocketRelay {
         this.logger.warn(`❌ Relay error: ${data.error}`);
       });
 
+      this.socket.on('store-request', (data) => {
+        const { requestId, storeId, fromPeerId } = data;
+        this.logger.info(`📥 Store request received: ${storeId} from ${fromPeerId}`);
+        
+        const handler = this.messageHandlers.get('store-request');
+        if (handler) {
+          handler({ requestId, storeId, fromPeerId });
+        }
+      });
+
       this.socket.on('disconnect', () => {
         this.logger.warn('📡 Disconnected from relay server');
       });
@@ -152,6 +162,27 @@ export class WebSocketRelay {
   // Check if relay is connected
   isConnected(): boolean {
     return this.socket?.connected || false;
+  }
+
+  // Send store response
+  sendStoreResponse(requestId: string, storeContent: Buffer | null, error?: string): void {
+    if (this.socket?.connected) {
+      if (storeContent) {
+        this.socket.emit('store-response', {
+          requestId,
+          success: true,
+          content: storeContent.toString('base64')
+        });
+        this.logger.debug(`📤 Sent store response: ${storeContent.length} bytes`);
+      } else {
+        this.socket.emit('store-response', {
+          requestId,
+          success: false,
+          error: error || 'Store not found'
+        });
+        this.logger.debug(`📤 Sent store error response: ${error}`);
+      }
+    }
   }
 
   // Get relay server URL

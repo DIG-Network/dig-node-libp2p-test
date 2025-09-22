@@ -66,5 +66,7 @@ export declare class DIGNode {
     private connectViaRelay;
     private initiateRelayConnection;
     private handleRelayOffer;
+    private discoverPeerStoresViaRelay;
+    private downloadStoreViaRelay;
     discoverAllPeers(): Promise<void>;
 }
