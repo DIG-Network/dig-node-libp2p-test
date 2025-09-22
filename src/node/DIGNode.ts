@@ -742,12 +742,13 @@ export class DIGNode {
       const peerId = event.detail.toString()
       this.discoveredPeers.add(peerId)
       this.metrics.peersConnected++
-      console.log(`🤝 Connected to peer: ${peerId}`)
+      this.logger.info(`🤝 Connected to peer: ${peerId}`)
+      this.logger.info(`📊 Total connected peers: ${this.node.getPeers().length}`)
       
       // Discover stores from this peer
       this.discoverPeerStores(peerId).catch(error => {
         this.metrics.errors++
-        console.warn(`❌ Failed to discover stores from peer ${peerId}:`, error)
+        this.logger.warn(`❌ Failed to discover stores from peer ${peerId}:`, error)
       })
     })
 
@@ -755,7 +756,8 @@ export class DIGNode {
       const peerId = event.detail.toString()
       this.discoveredPeers.delete(peerId)
       this.peerStores.delete(peerId)
-      console.log(`👋 Disconnected from peer: ${peerId}`)
+      this.logger.info(`👋 Disconnected from peer: ${peerId}`)
+      this.logger.info(`📊 Remaining connected peers: ${this.node.getPeers().length}`)
     })
   }
 
@@ -1012,19 +1014,43 @@ export class DIGNode {
     const knownAddresses = this.globalDiscovery.getKnownPeerAddresses()
     const currentPeers = new Set(this.node.getPeers().map(p => p.toString()))
     
+    this.logger.debug(`🔍 Attempting to connect to ${knownAddresses.length} discovered addresses`)
+    
     // Try to connect to new peers
-    for (const address of knownAddresses.slice(0, 10)) { // Limit to 10 attempts per round
+    for (const address of knownAddresses.slice(0, 5)) { // Reduce to 5 attempts per round
       try {
-        // Try to connect to the address (skip if already connected)
-        const connection = await this.node.dial(address as any)
-        const peerIdFromConn = connection.remotePeer.toString()
-        if (!currentPeers.has(peerIdFromConn)) {
-          this.logger.info(`🌍 Connected to discovered peer: ${peerIdFromConn}`)
+        this.logger.debug(`🔗 Attempting connection to: ${address}`)
+        
+        // Extract peer ID from address string (multiaddr format: .../p2p/PEER_ID)
+        const peerIdMatch = address.match(/\/p2p\/([^\/]+)$/)
+        const peerIdFromAddr = peerIdMatch ? peerIdMatch[1] : null
+        
+        // Skip if we're already connected to this peer
+        if (peerIdFromAddr && currentPeers.has(peerIdFromAddr)) {
+          this.logger.debug(`⏭️ Already connected to peer: ${peerIdFromAddr}`)
+          continue
         }
+        
+        // Attempt connection with timeout
+        const connection = await Promise.race([
+          this.node.dial(address as any),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Connection timeout')), 10000)
+          )
+        ]) as any
+        
+        const peerIdFromConn = connection.remotePeer.toString()
+        this.logger.info(`🌍 Successfully connected to discovered peer: ${peerIdFromConn}`)
+        this.logger.info(`📡 Connection address: ${address}`)
+        
       } catch (error) {
-        this.logger.debug(`Failed to connect to discovered peer ${address}:`, error)
+        this.logger.warn(`❌ Failed to connect to ${address}:`, error instanceof Error ? error.message : error)
       }
     }
+    
+    // Log current connection status
+    const connectedCount = this.node.getPeers().length
+    this.logger.info(`📊 Currently connected to ${connectedCount} peers`)
   }
 
   // Connect to manually configured peers
@@ -1068,18 +1094,31 @@ export class DIGNode {
 
     const peers = this.node.getPeers()
     const addresses = this.node.getMultiaddrs()
+    const knownAddresses = this.globalDiscovery ? this.globalDiscovery.getKnownPeerAddresses() : []
     
     return {
       listeningAddresses: addresses.map(addr => addr.toString()),
       connectedPeers: peers.map(peer => peer.toString()),
       peerCount: peers.length,
       discoveredPeers: Array.from(this.discoveredPeers),
+      knownAddresses: knownAddresses,
       peerStores: Object.fromEntries(
         Array.from(this.peerStores.entries()).map(([peerId, stores]) => [
           peerId, Array.from(stores)
         ])
-      )
+      ),
+      globalDiscoveryStats: this.globalDiscovery ? this.globalDiscovery.getStats() : null
     }
+  }
+
+  // Force connection attempts to all known peers
+  async forceConnectToPeers(): Promise<void> {
+    if (!this.isStarted) {
+      throw new Error('DIG Node is not started')
+    }
+
+    this.logger.info('🔗 Force connecting to all known peers...')
+    await this.connectToDiscoveredPeers()
   }
 
   // Force peer discovery across the network

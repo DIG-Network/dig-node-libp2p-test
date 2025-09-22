@@ -100,9 +100,14 @@ export class GlobalDiscovery {
                                 });
                                 // Add all addresses from this peer
                                 discoveredAddresses.push(...peer.addresses);
+                                this.logger.debug(`👤 Discovered peer: ${peer.peerId} with ${peer.addresses.length} addresses`);
+                            }
+                            else if (peer.peerId === this.peerId) {
+                                this.logger.debug(`⏭️ Skipping self-discovery: ${peer.peerId}`);
                             }
                         }
-                        this.logger.info(`🔍 Discovered ${data.peers.length} peers from ${server}`);
+                        const uniquePeers = data.peers.filter((p) => p.peerId !== this.peerId);
+                        this.logger.info(`🔍 Discovered ${uniquePeers.length} unique peers from ${server} (total: ${data.peers.length}, excluding self)`);
                     }
                 }
             }

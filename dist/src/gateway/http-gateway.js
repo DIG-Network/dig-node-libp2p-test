@@ -296,6 +296,23 @@ export class DIGGateway {
                 });
             }
         });
+        // Force peer connections
+        this.app.post('/force-connect', async (req, res) => {
+            try {
+                await this.digNode.forceConnectToPeers();
+                res.json({
+                    success: true,
+                    message: 'Force connection attempts initiated',
+                    connectionInfo: this.digNode.getConnectionInfo()
+                });
+            }
+            catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Force connection failed'
+                });
+            }
+        });
     }
     parseURN(urn) {
         if (!urn.toLowerCase().startsWith('urn:dig:chia:')) {

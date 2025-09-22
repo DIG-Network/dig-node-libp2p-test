@@ -59,5 +59,6 @@ export declare class DIGNode {
     private connectToConfiguredPeers;
     connectToPeer(peerAddress: string): Promise<void>;
     getConnectionInfo(): any;
+    forceConnectToPeers(): Promise<void>;
     discoverAllPeers(): Promise<void>;
 }

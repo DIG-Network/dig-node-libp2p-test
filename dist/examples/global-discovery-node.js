@@ -1,5 +1,7 @@
 import { DIGNode } from '../src/node/DIGNode';
 async function main() {
+    // Set debug logging to see connection details
+    process.env.DIG_LOG_LEVEL = 'DEBUG';
     // Configuration for global peer discovery
     const config = {
         port: parseInt(process.env.DIG_PORT || '4001'),
