@@ -9,6 +9,10 @@ import { ping } from '@libp2p/ping';
 import { identify } from '@libp2p/identify';
 import { pipe } from 'it-pipe';
 import { multiaddr } from '@multiformats/multiaddr';
+import { uPnPNAT } from '@libp2p/upnp-nat';
+import { autoNAT } from '@libp2p/autonat';
+import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
+import { webRTC } from '@libp2p/webrtc';
 import { toString as uint8ArrayToString } from 'uint8arrays/to-string';
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string';
 import { randomBytes } from 'crypto';
@@ -66,6 +70,15 @@ export class DIGNode {
                     list: this.config.bootstrapPeers
                 }));
             }
+            else {
+                // Add default LibP2P bootstrap nodes for relay discovery
+                peerDiscoveryServices.push(bootstrap({
+                    list: [
+                        '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+                        '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
+                    ]
+                }));
+            }
             // Add mDNS for local network discovery (can be disabled)
             if (this.config.enableMdns !== false) {
                 peerDiscoveryServices.push(mdns());
@@ -89,13 +102,22 @@ export class DIGNode {
                         `/ip6/::/tcp/${this.config.port || 0}` // Also listen on IPv6
                     ]
                 },
-                transports: [tcp()],
+                transports: [
+                    tcp(),
+                    webRTC(), // WebRTC for NAT traversal
+                    circuitRelayTransport() // Circuit relay for fallback
+                ],
                 connectionEncrypters: [noise()],
                 streamMuxers: [yamux()],
                 peerDiscovery: peerDiscoveryServices,
-                services,
+                services: {
+                    ...services,
+                    upnp: uPnPNAT(), // UPnP NAT traversal
+                    autonat: autoNAT() // Automatic NAT detection
+                },
                 connectionManager: {
-                    maxConnections: 100
+                    maxConnections: 100,
+                    dialTimeout: 30000 // Increase dial timeout for NAT traversal
                 }
             });
             await this.node.handle(DIG_PROTOCOL, this.handleDIGRequest.bind(this));
