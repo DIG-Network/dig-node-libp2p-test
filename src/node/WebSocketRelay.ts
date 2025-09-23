@@ -26,7 +26,11 @@ export class WebSocketRelay {
     
     const wsUrl = this.bootstrapServerUrl.replace('http://', 'ws://').replace('https://', 'wss://');
     
-    this.socket = io(wsUrl);
+    this.socket = io(wsUrl, {
+      transports: ['websocket'], // Match bootstrap server websocket-only config
+      upgrade: true,
+      rememberUpgrade: false
+    });
     
     return new Promise((resolve, reject) => {
       if (!this.socket) {
