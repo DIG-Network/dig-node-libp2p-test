@@ -47,28 +47,28 @@ resource "aws_s3_bucket" "eb_bucket" {
 
 # Application version
 resource "aws_elastic_beanstalk_application_version" "dig_bootstrap_version" {
-  name         = "v1.0.6"
+  name         = "v3.1.0"
   application  = aws_elastic_beanstalk_application.dig_bootstrap.name
-  description  = "Unified DIG Node v1.0.6 - P2P + Bootstrap + TURN + E2E Encryption"
+  description  = "Final Bootstrap Server v3.1.0 - Byte-Range + Load Balancing"
   bucket       = aws_s3_bucket.eb_bucket.bucket
-  key          = "bootstrap-app-v7.zip"
+  key          = "bootstrap-server-v2-final.zip"
 
   depends_on = [aws_s3_bucket.eb_bucket]
 }
 
 # Elastic Beanstalk Environment
 resource "aws_elastic_beanstalk_environment" "dig_bootstrap_env" {
-  name                = "dig-bootstrap-${var.environment}"
+  name                = "dig-bootstrap-v2-${var.environment}"
   application         = aws_elastic_beanstalk_application.dig_bootstrap.name
   solution_stack_name = "64bit Amazon Linux 2023 v4.7.1 running Docker"
   version_label       = aws_elastic_beanstalk_application_version.dig_bootstrap_version.name
   tier                = "WebServer"
 
-  # Use cheapest possible instance type
+  # Use nano instance type for dedicated bootstrap server
   setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "InstanceType"
-    value     = "t3.nano" # Cheapest: 2 vCPU, 0.5 GB RAM, $3.80/month
+    value     = "t3.nano" # 2 vCPU, 0.5 GB RAM, ~$3.80/month - sufficient for dedicated bootstrap
   }
 
   # Instance profile
@@ -104,6 +104,19 @@ resource "aws_elastic_beanstalk_environment" "dig_bootstrap_env" {
     value     = "/health"
   }
 
+  # Health check settings for LibP2P application
+  setting {
+    namespace = "aws:elasticbeanstalk:healthreporting:system"
+    name      = "HealthCheckSuccessThreshold"
+    value     = "Ok"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:healthreporting:system"
+    name      = "EnhancedHealthAuthEnabled"
+    value     = "false"
+  }
+
   # Environment variables
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
@@ -121,6 +134,43 @@ resource "aws_elastic_beanstalk_environment" "dig_bootstrap_env" {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DIG_LOG_LEVEL"
     value     = "INFO"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DIG_PORT"
+    value     = "4001"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "TURN_PORT"
+    value     = "3478"
+  }
+
+  # AWS-specific configuration
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "AWS_DEPLOYMENT"
+    value     = "true"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "LIBP2P_DISABLE_UPNP"
+    value     = "true"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "LIBP2P_DISABLE_MDNS"
+    value     = "true"
+  }
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "LIBP2P_DISABLE_AUTONAT"
+    value     = "true"
   }
 
   # Load balancer configuration
@@ -148,6 +198,9 @@ resource "aws_elastic_beanstalk_environment" "dig_bootstrap_env" {
     name      = "ELBSubnets"
     value     = join(",", aws_default_subnet.default[*].id)
   }
+
+  # Let DIG node use default path and gracefully degrade if needed
+  # No DIG_PATH specified - will use container default /app/dig
 
   # Security group for the bootstrap server
   setting {
@@ -238,6 +291,30 @@ resource "aws_security_group" "dig_bootstrap" {
   ingress {
     from_port   = 3000
     to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # LibP2P P2P port
+  ingress {
+    from_port   = 4001
+    to_port     = 4001
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # LibP2P WebSocket port (P2P port + 1)
+  ingress {
+    from_port   = 4002
+    to_port     = 4002
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # LibP2P port range for dynamic binding
+  ingress {
+    from_port   = 4003
+    to_port     = 4010
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -357,9 +434,7 @@ resource "aws_iam_instance_profile" "eb_ec2_profile" {
   role = aws_iam_role.eb_ec2_role.name
 }
 
-# Note: Using default Elastic Beanstalk URL instead of custom domain
-# The bootstrap server will be available at: 
-# http://dig-bootstrap-{environment}.{region}.elasticbeanstalk.com
+# EFS removed - using container storage with graceful degradation
 
 # CloudWatch Log Group for application logs
 resource "aws_cloudwatch_log_group" "dig_bootstrap_logs" {

@@ -6,6 +6,10 @@ export class WebSocketRelay {
   private socket: Socket | null = null;
   private relayConnections = new Map<string, any>();
   private messageHandlers = new Map<string, (data: any) => void>();
+  private failureCount = 0;
+  private maxFailures = 3;
+  private backoffTime = 60000; // 1 minute
+  private lastFailureTime = 0;
 
   constructor(
     private bootstrapServerUrl: string,
@@ -13,6 +17,13 @@ export class WebSocketRelay {
   ) {}
 
   async connect(): Promise<void> {
+    // Check if we should back off due to repeated failures
+    const now = Date.now();
+    if (this.failureCount >= this.maxFailures && 
+        now - this.lastFailureTime < this.backoffTime) {
+      throw new Error(`WebSocket relay backing off (${this.failureCount} failures, retry in ${Math.ceil((this.backoffTime - (now - this.lastFailureTime)) / 1000)}s)`);
+    }
+    
     const wsUrl = this.bootstrapServerUrl.replace('http://', 'ws://').replace('https://', 'wss://');
     
     this.socket = io(wsUrl);
@@ -25,6 +36,10 @@ export class WebSocketRelay {
 
       this.socket.on('connect', () => {
         this.logger.info(`🔗 Connected to relay server: ${wsUrl}`);
+        
+        // Reset failure count on successful connection
+        this.failureCount = 0;
+        this.lastFailureTime = 0;
         
         // Register this peer for relay
         this.socket!.emit('register-relay', { peerId: this.peerId });
@@ -97,6 +112,8 @@ export class WebSocketRelay {
       });
 
       this.socket.on('connect_error', (error) => {
+        this.failureCount++;
+        this.lastFailureTime = Date.now();
         this.logger.error('❌ Relay connection error:', error);
         reject(error);
       });

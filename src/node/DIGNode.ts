@@ -30,6 +30,7 @@ import {
   DIGNodeConfig, 
   DIGRequest, 
   DIGResponse, 
+  NodeCapabilities,
   DiscoveryRequest, 
   DiscoveryResponse,
   DIG_PROTOCOL, 
@@ -62,6 +63,22 @@ export class DIGNode {
   private webSocketRelay!: WebSocketRelay
   private e2eEncryption = new E2EEncryption()
   private peerProtocolVersions = new Map<string, string>() // peerId -> protocol version
+  private nodeCapabilities: NodeCapabilities = {
+    libp2p: false,
+    dht: false,
+    mdns: false,
+    upnp: false,
+    autonat: false,
+    webrtc: false,
+    websockets: false,
+    circuitRelay: false,
+    turnServer: false,
+    bootstrapServer: false,
+    storeSync: false,
+    e2eEncryption: false,
+    protocolVersion: '1.0.0',
+    environment: 'development'
+  }
   private requestCounts = new Map<string, { count: number; lastReset: number }>()
   
   // Built-in Bootstrap Server
@@ -92,6 +109,100 @@ export class DIGNode {
     this.validateConfig(config)
     this.digPath = config.digPath || join(homedir(), '.dig')
     this.setupBuiltInBootstrapServer()
+    this.detectEnvironment()
+  }
+
+  // Ensure DIG directory exists, create if needed, or gracefully disable file features
+  private async ensureDigDirectory(): Promise<boolean> {
+    try {
+      const { access } = await import('fs/promises')
+      await access(this.digPath)
+      this.logger.info(`📁 DIG directory exists: ${this.digPath}`)
+      return true
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        try {
+          const { mkdir } = await import('fs/promises')
+          await mkdir(this.digPath, { recursive: true })
+          this.logger.info(`✅ Created DIG directory: ${this.digPath}`)
+          return true
+        } catch (mkdirError) {
+          this.logger.warn(`⚠️ Cannot create DIG directory ${this.digPath}, running in bootstrap-only mode:`, mkdirError instanceof Error ? mkdirError.message : mkdirError)
+          
+          // Gracefully disable file-related capabilities
+          this.nodeCapabilities.storeSync = false
+          
+          const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+          if (isAWS) {
+            this.logger.info('🌐 AWS container storage not writable - continuing in bootstrap-only mode')
+          }
+          return false
+        }
+      } else {
+        this.logger.warn(`⚠️ Cannot access DIG directory, running in bootstrap-only mode:`, error instanceof Error ? error.message : error)
+        this.nodeCapabilities.storeSync = false
+        return false
+      }
+    }
+  }
+
+  // Detect and configure environment-specific capabilities
+  private detectEnvironment(): void {
+    const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+    
+    this.nodeCapabilities.environment = isAWS ? 'aws' : 
+      (process.env.NODE_ENV === 'production' ? 'production' : 'development')
+    
+    // Set baseline capabilities
+    this.nodeCapabilities.e2eEncryption = true
+    this.nodeCapabilities.storeSync = true
+    this.nodeCapabilities.bootstrapServer = true
+    
+    this.logger.info(`🔍 Environment detected: ${this.nodeCapabilities.environment}`)
+  }
+
+  // Safely try to initialize a service and update capabilities
+  private async safeServiceInit<T>(
+    serviceName: keyof NodeCapabilities,
+    initFunction: () => T | Promise<T>,
+    description: string
+  ): Promise<T | null> {
+    try {
+      this.logger.debug(`🔧 Initializing ${description}...`)
+      const result = await initFunction()
+      if (typeof this.nodeCapabilities[serviceName] === 'boolean') {
+        (this.nodeCapabilities as any)[serviceName] = true
+      }
+      this.logger.info(`✅ ${description} initialized successfully`)
+      return result
+    } catch (error) {
+      if (typeof this.nodeCapabilities[serviceName] === 'boolean') {
+        (this.nodeCapabilities as any)[serviceName] = false
+      }
+      this.logger.warn(`⚠️ ${description} failed to initialize (gracefully disabled):`, error instanceof Error ? error.message : error)
+      return null
+    }
+  }
+
+  // Get current node capabilities for sharing with peers
+  public getCapabilities(): NodeCapabilities {
+    return { ...this.nodeCapabilities }
+  }
+
+  // Helper method to add optional services
+  private async addOptionalService<T>(
+    serviceName: keyof NodeCapabilities,
+    shouldEnable: boolean,
+    serviceFactory: () => T | Promise<T>,
+    description: string
+  ): Promise<Record<string, T> | {}> {
+    if (!shouldEnable) {
+      this.logger.info(`⏭️ ${description} disabled by configuration`)
+      return {}
+    }
+
+    const service = await this.safeServiceInit(serviceName, serviceFactory, description)
+    return service ? { [serviceName]: service } : {}
   }
 
   // Get bootstrap server hostname for TURN configuration
@@ -102,10 +213,10 @@ export class DIGNode {
         const parsed = new URL(url)
         return parsed.hostname
       } catch (error) {
-        return 'dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
+        return 'dig-bootstrap-v2-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
       }
     }
-    return 'dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
+    return 'dig-bootstrap-v2-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
   }
 
   // Create circuit relay address for NAT traversal
@@ -155,28 +266,37 @@ export class DIGNode {
       this.logger.info(`🚀 Starting DIG Node...`)
       this.logger.info(`🌐 Crypto IPv6: ${this.cryptoIPv6}`)
       this.logger.info(`📁 DIG Path: ${this.digPath}`)
-      this.logger.debug(`🔧 Config:`, this.config)
+      
+      // Ensure DIG directory exists before proceeding, or gracefully disable file features
+      const hasFileAccess = await this.ensureDigDirectory()
 
     const peerDiscoveryServices = []
     
-    // Add bootstrap discovery if configured
+    // Detect AWS environment early
+    const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+    const disableMdns = process.env.LIBP2P_DISABLE_MDNS === 'true'
+    
+    this.logger.info(`🏗️ Environment: ${isAWS ? 'AWS Production' : 'Development'}`)
+    if (isAWS) {
+      this.logger.info(`🔧 AWS Optimizations: UPnP=${!process.env.LIBP2P_DISABLE_UPNP}, mDNS=${!disableMdns}, AutoNAT=${!process.env.LIBP2P_DISABLE_AUTONAT}`)
+    }
+    this.logger.debug(`🔧 Config:`, this.config)
+    
+    // Only use DIG network bootstrap nodes (not public LibP2P)
     if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
       peerDiscoveryServices.push(bootstrap({
         list: this.config.bootstrapPeers
       }))
+      this.logger.info(`🔗 Using custom DIG bootstrap peers: ${this.config.bootstrapPeers.length} nodes`)
     } else {
-      // Add default LibP2P bootstrap nodes for relay discovery
-      peerDiscoveryServices.push(bootstrap({
-        list: [
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
-        ]
-      }))
+      this.logger.info('🔗 No bootstrap peers configured - this node will be isolated until other DIG nodes connect')
     }
     
-    // Add mDNS for local network discovery (can be disabled)
-    if (this.config.enableMdns !== false) {
+    if (this.config.enableMdns !== false && !isAWS && !disableMdns) {
       peerDiscoveryServices.push(mdns())
+      this.logger.info('🔍 mDNS enabled for local network discovery')
+    } else {
+      this.logger.info(`🌐 mDNS disabled (AWS: ${isAWS}, Disabled: ${disableMdns})`)
     }
 
     const services: any = {
@@ -184,50 +304,101 @@ export class DIGNode {
       identify: identify()
     }
     
-    // Add DHT service if enabled (default: true)
+    // Safely initialize DHT service
     if (this.config.enableDht !== false) {
-      services.dht = kadDHT({
+      const dhtService = await this.safeServiceInit('dht', () => kadDHT({
         clientMode: false, // Run as DHT server
         validators: {},
         selectors: {}
-      })
+      }), 'DHT Service')
+      
+      if (dhtService) {
+        services.dht = dhtService
+      }
     }
 
-    this.node = await createLibp2p({
-      addresses: {
-        listen: [
-          `/ip4/0.0.0.0/tcp/${this.config.port || 0}`,
-          `/ip6/::/tcp/${this.config.port || 0}`,
-          `/ip4/0.0.0.0/tcp/${(this.config.port || 0) + 1}/ws` // WebSocket for NAT traversal
-        ]
-      },
-      transports: [
-        tcp(),
-        webSockets({ filter: all }), // WebSockets for NAT traversal
-        webRTC({
+    // Configure addresses based on environment
+    const addresses = isAWS ? {
+      listen: [
+        `/ip4/0.0.0.0/tcp/${this.config.port || 4001}`, // Fixed port for AWS
+        `/ip4/0.0.0.0/tcp/${(this.config.port || 4001) + 1}/ws` // WebSocket for NAT traversal
+      ]
+    } : {
+      listen: [
+        `/ip4/0.0.0.0/tcp/${this.config.port || 0}`, // Dynamic port for development
+        `/ip6/::/tcp/${this.config.port || 0}`,
+        `/ip4/0.0.0.0/tcp/${(this.config.port || 0) + 1}/ws` // WebSocket for NAT traversal
+      ]
+    }
+
+    this.logger.info(`🔗 LibP2P addresses: ${addresses.listen.join(', ')}`)
+
+    // Build transports with graceful degradation
+    const transports: any[] = [tcp()] // TCP is always available
+
+    // Try to add WebSocket transport
+    try {
+      transports.push(webSockets({ filter: all }))
+      this.nodeCapabilities.websockets = true
+      this.logger.info('✅ WebSocket transport enabled')
+    } catch (error) {
+      this.logger.warn('⚠️ WebSocket transport disabled:', error instanceof Error ? error.message : error)
+      this.nodeCapabilities.websockets = false
+    }
+
+    // Try to add WebRTC transport (only in non-AWS environments)
+    if (!isAWS) {
+      try {
+        transports.push(webRTC({
           rtcConfiguration: {
             iceServers: [
               { urls: ['stun:stun.l.google.com:19302'] },
               { urls: ['stun:stun1.l.google.com:19302'] },
-              { urls: ['stun:global.stun.twilio.com:3478'] },
-              // Use our bootstrap server as TURN server
-              { 
-                urls: [`turn:${this.getBootstrapServerHost()}:3478`],
-                username: 'dig-network',
-                credential: 'dig-network-turn'
-              }
+              { urls: ['stun:global.stun.twilio.com:3478'] }
             ]
           }
-        }), // WebRTC with STUN/TURN servers for NAT traversal
-        circuitRelayTransport() // Circuit relay for fallback
-      ],
+        }))
+        this.nodeCapabilities.webrtc = true
+        this.logger.info('✅ WebRTC transport enabled')
+      } catch (error) {
+        this.logger.warn('⚠️ WebRTC transport disabled:', error instanceof Error ? error.message : error)
+        this.nodeCapabilities.webrtc = false
+      }
+    } else {
+      this.logger.info('⏭️ WebRTC transport disabled (AWS environment)')
+      this.nodeCapabilities.webrtc = false
+    }
+
+    // Try to add Circuit Relay transport
+    try {
+      transports.push(circuitRelayTransport())
+      this.nodeCapabilities.circuitRelay = true
+      this.logger.info('✅ Circuit Relay transport enabled')
+    } catch (error) {
+      this.logger.warn('⚠️ Circuit Relay transport disabled:', error instanceof Error ? error.message : error)
+      this.nodeCapabilities.circuitRelay = false
+    }
+
+    this.node = await createLibp2p({
+      addresses,
+      transports,
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       peerDiscovery: peerDiscoveryServices,
       services: {
         ...services,
-        upnp: uPnPNAT(), // UPnP NAT traversal
-        autonat: autoNAT() // Automatic NAT detection
+        // Safely add UPnP service (only in non-AWS environments)
+        ...(await this.addOptionalService('upnp', 
+          !isAWS && process.env.LIBP2P_DISABLE_UPNP !== 'true',
+          () => uPnPNAT(),
+          'UPnP NAT Traversal'
+        )),
+        // Safely add AutoNAT service (only in non-AWS environments)  
+        ...(await this.addOptionalService('autonat',
+          !isAWS && process.env.LIBP2P_DISABLE_AUTONAT !== 'true',
+          () => autoNAT(),
+          'AutoNAT Detection'
+        ))
       },
       connectionManager: {
         maxConnections: 100,
@@ -236,28 +407,84 @@ export class DIGNode {
       }
     })
 
+    // LibP2P successfully created - mark as available
+    this.nodeCapabilities.libp2p = true
+    
     await this.node.handle(DIG_PROTOCOL, this.handleDIGRequest.bind(this))
     await this.node.handle(DIG_DISCOVERY_PROTOCOL, this.handleDiscoveryRequest.bind(this))
 
-      await this.scanDIGFiles()
-      await this.announceStores()
-      await this.startFileWatcher()
+      // Only scan files and start watcher if we have file access
+      if (hasFileAccess) {
+        await this.scanDIGFiles()
+        await this.announceStores()
+        await this.startFileWatcher()
+        this.logger.info('📁 File operations enabled')
+      } else {
+        this.logger.info('📁 File operations disabled - bootstrap-only mode')
+      }
       this.startPeerDiscovery()
       this.startStoreSync()
-      await this.startGlobalDiscovery()
-      await this.startWebSocketRelay()
-      await this.startBuiltInBootstrapServer()
-      await this.detectTurnCapability()
+      // Safely start additional services
+      await this.safeServiceInit('bootstrapServer', () => this.startBuiltInBootstrapServer(), 'Built-in Bootstrap Server')
+      await this.safeServiceInit('turnServer', () => this.detectTurnCapability(), 'TURN Server Detection')
+      
+      // These are less likely to fail but still use safe init for consistency
+      if (this.config.enableGlobalDiscovery !== false) {
+        await this.safeServiceInit('storeSync', () => this.startGlobalDiscovery(), 'Global Discovery')
+      }
+      
+      // WebSocket relay depends on bootstrap server
+      if (this.nodeCapabilities.bootstrapServer) {
+        await this.safeServiceInit('websockets', () => this.startWebSocketRelay(), 'WebSocket Relay')
+      }
+      
       await this.connectToConfiguredPeers()
 
       this.isStarted = true
+      
+      // Report successful capabilities
+      const capabilities = this.getCapabilities()
+      const enabledCapabilities = Object.entries(capabilities)
+        .filter(([_, value]) => value === true)
+        .map(([key]) => key)
+      
       console.log(`✅ DIG Node started successfully`)
       console.log(`🆔 Peer ID: ${this.node.peerId.toString()}`)
       console.log(`📁 Available stores: ${this.digFiles.size}`)
+      console.log(`🏗️ Environment: ${capabilities.environment}`)
+      console.log(`🔧 Active capabilities (${enabledCapabilities.length}): ${enabledCapabilities.join(', ')}`)
       console.log(`🔄 Peer discovery and store sync enabled`)
     } catch (error) {
       this.metrics.errors++
       console.error(`❌ Failed to start DIG Node:`, error)
+      
+      // In AWS, still try to start the bootstrap server even if LibP2P fails
+      const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+      if (isAWS) {
+        console.log('🔄 LibP2P failed in AWS, attempting to start bootstrap server only...')
+        try {
+          // Only start bootstrap server if it hasn't been started already
+          if (!this.nodeCapabilities.bootstrapServer) {
+            await this.startBuiltInBootstrapServer()
+          }
+          this.nodeCapabilities.bootstrapServer = true
+          this.isStarted = true
+          
+          console.log('✅ DIG Node started in bootstrap-only mode (AWS fallback)')
+          console.log('🌐 Bootstrap server running for peer discovery')
+          console.log('⚠️ LibP2P P2P features disabled due to AWS environment constraints')
+          
+          const capabilities = this.getCapabilities()
+          const enabledCapabilities = Object.entries(capabilities)
+            .filter(([_, value]) => value === true)
+            .map(([key]) => key)
+          console.log(`🔧 Available capabilities: ${enabledCapabilities.join(', ')}`)
+          return
+        } catch (bootstrapError) {
+          console.error('❌ Failed to start even bootstrap server:', bootstrapError)
+        }
+      }
+      
       await this.cleanup()
       throw error
     }
@@ -484,7 +711,39 @@ export class DIGNode {
   }
 
   private getBootstrapPort(): number {
-    return (this.config.port || 4001) + 1000 // Bootstrap on P2P port + 1000
+    // Use PORT environment variable for AWS compatibility, otherwise P2P port + 1000
+    return parseInt(process.env.PORT || '0') || (this.config.port || 4001) + 1000
+  }
+
+  // Check if the discovery server points to this node itself
+  private isSelfRelay(bootstrapUrl: string, ourPort: number): boolean {
+    try {
+      const url = new URL(bootstrapUrl)
+      const urlPort = parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80)
+      
+      // Check if it's pointing to localhost or our port
+      const isLocalhost = url.hostname === 'localhost' || 
+                         url.hostname === '127.0.0.1' || 
+                         url.hostname === '0.0.0.0'
+      
+      const isSamePort = urlPort === ourPort
+      
+      if (isLocalhost && isSamePort) {
+        this.logger.debug(`Self-relay detected: ${bootstrapUrl} points to localhost:${ourPort}`)
+        return true
+      }
+      
+      // For development, check if multiple nodes are running on same machine with different ports
+      if (isLocalhost) {
+        this.logger.debug(`Different localhost port: ${urlPort} vs our ${ourPort}`)
+        return false
+      }
+      
+      return false
+    } catch (error) {
+      this.logger.debug('Error parsing bootstrap URL for self-relay check:', error)
+      return false
+    }
   }
 
   // Handle protocol handshake and establish end-to-end encryption
@@ -505,16 +764,22 @@ export class DIGNode {
         this.logger.info(`🔐 End-to-end encryption established with ${peerId}`);
       }
       
-      // Determine compatible features
-      const myFeatures = E2EEncryption.getProtocolCapabilities();
+      // Get our current capabilities and combine with E2E features
+      const capabilities = this.getCapabilities();
+      const capabilityList = Object.entries(capabilities)
+        .filter(([_, value]) => value === true)
+        .map(([key]) => key);
+      
+      const myFeatures = [...E2EEncryption.getProtocolCapabilities(), ...capabilityList];
       const peerFeatures = supportedFeatures || [];
       const compatibleFeatures = myFeatures.filter(feature => peerFeatures.includes(feature));
       
-      this.logger.info(`✅ Compatible features with ${peerId}: ${compatibleFeatures.join(', ')}`);
+      this.logger.info(`🤝 Protocol handshake with ${peerId}: sharing ${capabilityList.length} node capabilities`);
+      this.logger.info(`✅ Compatible features: ${compatibleFeatures.join(', ')}`);
       
       return {
         success: true,
-        protocolVersion: E2EEncryption.getProtocolVersion(),
+        protocolVersion: capabilities.protocolVersion,
         supportedFeatures: myFeatures,
         publicKey: this.e2eEncryption.getPublicKey(),
         metadata: {
@@ -721,6 +986,14 @@ export class DIGNode {
               } else {
                 self.logger.warn(`Invalid GET_URN request from peer ${peerId}`)
               }
+            } else if (request.type === 'GET_FILE_RANGE') {
+              const { storeId, filePath, rangeStart, rangeEnd, chunkId } = request
+              if (self.validateStoreId(storeId) && filePath && 
+                  typeof rangeStart === 'number' && typeof rangeEnd === 'number') {
+                yield* self.serveFileRange(storeId, filePath, rangeStart, rangeEnd, chunkId)
+              } else {
+                self.logger.warn(`Invalid GET_FILE_RANGE request from peer ${peerId}`)
+              }
             } else if (request.type === 'GET_STORE_CONTENT') {
               const { storeId } = request
               if (self.validateStoreId(storeId)) {
@@ -789,6 +1062,73 @@ export class DIGNode {
     }
     
     yield* this.serveFileFromStore(storeId, filePath)
+  }
+
+  // Serve byte range from file for parallel downloads
+  private async *serveFileRange(storeId: string, filePath: string, rangeStart: number, rangeEnd: number, chunkId?: string): AsyncGenerator<Uint8Array> {
+    const digFile = this.digFiles.get(storeId)
+    
+    if (!digFile) {
+      const response: DIGResponse = {
+        success: false,
+        error: 'Store not found',
+        chunkId
+      }
+      yield uint8ArrayFromString(JSON.stringify(response))
+      return
+    }
+
+    try {
+      const content = digFile.content
+      const totalSize = content.length
+      
+      // Validate range
+      if (rangeStart < 0 || rangeEnd >= totalSize || rangeStart > rangeEnd) {
+        const response: DIGResponse = {
+          success: false,
+          error: `Invalid range: ${rangeStart}-${rangeEnd} (file size: ${totalSize})`,
+          chunkId,
+          totalSize
+        }
+        yield uint8ArrayFromString(JSON.stringify(response))
+        return
+      }
+
+      // Extract the requested byte range
+      const rangeContent = content.subarray(rangeStart, rangeEnd + 1)
+      
+      const response: DIGResponse = {
+        success: true,
+        storeId,
+        size: rangeContent.length,
+        totalSize,
+        rangeStart,
+        rangeEnd,
+        chunkId,
+        isPartial: true,
+        mimeType: digFile.metadata.mimeType
+      }
+
+      this.logger.debug(`📤 Serving range ${rangeStart}-${rangeEnd} of ${storeId} (${rangeContent.length} bytes)`)
+      
+      // Send response header first
+      yield uint8ArrayFromString(JSON.stringify(response) + '\n')
+      
+      // Send the range content in chunks for better streaming
+      const CHUNK_SIZE = 64 * 1024 // 64KB chunks
+      for (let i = 0; i < rangeContent.length; i += CHUNK_SIZE) {
+        const chunk = rangeContent.subarray(i, Math.min(i + CHUNK_SIZE, rangeContent.length))
+        yield chunk
+      }
+      
+    } catch (error) {
+      const response: DIGResponse = {
+        success: false,
+        error: `Failed to serve range: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        chunkId
+      }
+      yield uint8ArrayFromString(JSON.stringify(response))
+    }
   }
 
   // Serve file from store - serves the entire .dig file as binary data
@@ -979,21 +1319,21 @@ export class DIGNode {
     try {
       console.log(`🔍 Starting file watcher for ${this.digPath}`)
       
+      // Ensure directory exists before watching
+      await this.ensureDigDirectory()
+      
       this.watcher = watch(this.digPath, { recursive: false })
       
       // Run watcher in background without blocking
       this.runFileWatcher()
     } catch (error: any) {
+      const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+      
       if (error.code === 'ENOENT') {
-        console.warn(`📁 DIG directory ${this.digPath} does not exist, creating it...`)
-        try {
-          const { mkdir } = await import('fs/promises')
-          await mkdir(this.digPath, { recursive: true })
-          console.log(`✅ Created DIG directory: ${this.digPath}`)
-          // Restart watcher after creating directory
-          await this.startFileWatcher()
-        } catch (mkdirError) {
-          console.error(`❌ Failed to create DIG directory:`, mkdirError)
+        if (isAWS) {
+          this.logger.warn(`⚠️ File watcher disabled: Cannot access ${this.digPath} (AWS EFS may not be mounted)`)
+        } else {
+          console.error(`❌ Failed to access DIG directory: ${this.digPath}`)
         }
       } else {
         console.error(`❌ File watcher error:`, error)
@@ -1007,11 +1347,20 @@ export class DIGNode {
       for await (const event of this.watcher) {
         await this.handleFileSystemEvent(event)
       }
-    } catch (error) {
+    } catch (error: any) {
       if (this.watcher) {
+        // In AWS, if EFS is not mounted, don't spam errors
+        const isAWS = process.env.AWS_DEPLOYMENT === 'true' || (process.env.NODE_ENV === 'production' && process.env.PORT)
+        if (error.code === 'ENOENT' && isAWS) {
+          this.logger.warn(`⚠️ File watcher disabled: EFS path ${this.digPath} not accessible (AWS EFS may not be mounted)`)
+          return // Don't retry in AWS if EFS is not available
+        }
+        
         console.error(`❌ File watcher loop error:`, error)
-        // Try to restart watcher after a delay
-        setTimeout(() => this.startFileWatcher(), 5000)
+        // Try to restart watcher after a delay (only in non-AWS environments)
+        if (!isAWS) {
+          setTimeout(() => this.startFileWatcher(), 5000)
+        }
       }
     }
   }
@@ -1090,18 +1439,24 @@ export class DIGNode {
       this.logger.info(`🤝 Connected to peer: ${peerId}`)
       this.logger.info(`📊 Total connected peers: ${this.node.getPeers().length}`)
       
-      // Initiate protocol handshake for encryption and capability negotiation
-      this.initiateProtocolHandshake(peerId).catch(error => {
-        this.logger.warn(`Handshake failed with ${peerId}:`, error)
-      })
-      
-      // Discover stores from this peer (after handshake)
-      setTimeout(() => {
-        this.discoverPeerStores(peerId).catch(error => {
-          this.metrics.errors++
-          this.logger.warn(`❌ Failed to discover stores from peer ${peerId}:`, error)
+      // Only initiate handshake with non-bootstrap LibP2P peers (not random internet peers)
+      // Skip handshake for bootstrap nodes and random peers
+      if (!peerId.startsWith('Qm') && !peerId.includes('bootstrap')) {
+        this.initiateProtocolHandshake(peerId).catch(error => {
+          this.logger.debug(`Handshake failed with ${peerId} (likely not a DIG node):`, error)
         })
-      }, 1000) // Wait for handshake to complete
+      } else {
+        this.logger.debug(`⏭️ Skipping handshake with bootstrap/relay peer: ${peerId}`)
+      }
+      
+      // Only discover stores from DIG nodes (after handshake)
+      if (!peerId.startsWith('Qm') && !peerId.includes('bootstrap')) {
+        setTimeout(() => {
+          this.discoverPeerStores(peerId).catch(error => {
+            this.logger.debug(`Store discovery failed with ${peerId} (likely not a DIG node):`, error)
+          })
+        }, 2000) // Wait for handshake to complete
+      }
     })
 
     this.node.addEventListener('peer:disconnect', (event) => {
@@ -1133,6 +1488,12 @@ export class DIGNode {
     try {
       const peer = this.node.getPeers().find(p => p.toString() === peerId)
       if (!peer) return
+
+      // Only try to discover stores from peers that support our protocol
+      if (!this.peerProtocolVersions.has(peerId)) {
+        this.logger.debug(`⏭️ Skipping store discovery from non-DIG peer: ${peerId}`)
+        return
+      }
 
       // Try to open a stream to the peer for discovery
       const stream = await this.node.dialProtocol(peer, DIG_DISCOVERY_PROTOCOL)
@@ -1249,10 +1610,21 @@ export class DIGNode {
       }
     }
 
-    // 2. Try LibP2P download first
+    // 2. Try LibP2P download first (with parallel support for large files)
     if (availablePeers.length > 0) {
       console.log(`📡 Attempting LibP2P download from ${availablePeers.length} connected peers`)
       
+      // For multiple peers, try parallel download for better performance
+      if (availablePeers.length > 1) {
+        try {
+          const success = await this.downloadStoreInParallelFromPeers(storeId, availablePeers)
+          if (success) return // Success with parallel download
+        } catch (error) {
+          this.logger.warn(`Parallel LibP2P download failed:`, error)
+        }
+      }
+      
+      // Fallback to sequential download
       for (const { peerId, peer } of availablePeers) {
         try {
           await this.downloadStoreFromLibP2PPeer(storeId, peerId, peer);
@@ -1280,6 +1652,238 @@ export class DIGNode {
       console.log(`✅ Downloaded ${storeId} via bootstrap server (absolute last resort)`);
     } catch (bootstrapError) {
       console.warn(`❌ All download methods failed for store ${storeId}:`, bootstrapError);
+    }
+  }
+
+  // Download store in parallel from multiple LibP2P peers
+  private async downloadStoreInParallelFromPeers(storeId: string, availablePeers: Array<{peerId: string, peer: any}>): Promise<boolean> {
+    try {
+      // Get file size from first peer
+      const firstPeer = availablePeers[0]
+      const fileSize = await this.getFileSizeFromPeer(firstPeer.peerId, storeId)
+      
+      if (!fileSize || fileSize < 1024 * 1024) { // Less than 1MB
+        this.logger.info(`📥 File too small for parallel download: ${fileSize} bytes`)
+        return false // Use regular download
+      }
+
+      this.logger.info(`📥 Starting parallel download: ${fileSize} bytes from ${availablePeers.length} peers`)
+
+      const CHUNK_SIZE = 256 * 1024 // 256KB chunks
+      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE)
+      const chunks = new Map<number, Buffer>()
+      
+      // Create download tasks
+      const downloadTasks = []
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const peerIndex = chunkIndex % availablePeers.length
+        const { peerId, peer } = availablePeers[peerIndex]
+        
+        const rangeStart = chunkIndex * CHUNK_SIZE
+        const rangeEnd = Math.min(rangeStart + CHUNK_SIZE - 1, fileSize - 1)
+        
+        downloadTasks.push(
+          this.downloadChunkFromLibP2PPeer(peerId, peer, storeId, rangeStart, rangeEnd, chunkIndex, chunks)
+        )
+      }
+
+      // Execute downloads with controlled concurrency
+      const results = await this.executeConcurrentDownloads(downloadTasks, 4) // Max 4 concurrent
+      const successCount = results.filter(Boolean).length
+      
+      this.logger.info(`📥 Parallel download results: ${successCount}/${totalChunks} chunks successful`)
+
+      if (successCount === totalChunks) {
+        // Assemble and save file
+        const assembledFile = this.assembleChunks(chunks, totalChunks)
+        if (assembledFile) {
+          await this.saveDownloadedStore(storeId, assembledFile)
+          this.logger.info(`✅ Parallel download completed: ${storeId} (${assembledFile.length} bytes)`)
+          return true
+        }
+      }
+
+      return false
+    } catch (error) {
+      this.logger.error(`Parallel download failed:`, error)
+      return false
+    }
+  }
+
+  // Download a chunk from a specific LibP2P peer
+  private async downloadChunkFromLibP2PPeer(
+    peerId: string, 
+    peer: any, 
+    storeId: string, 
+    rangeStart: number, 
+    rangeEnd: number, 
+    chunkIndex: number,
+    chunks: Map<number, Buffer>
+  ): Promise<boolean> {
+    try {
+      this.logger.debug(`📥 Chunk ${chunkIndex}: requesting ${rangeStart}-${rangeEnd} from ${peerId}`)
+      
+      const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL)
+      const chunkId = `${storeId}_${chunkIndex}_${Date.now()}`
+      
+      const request: DIGRequest = {
+        type: 'GET_FILE_RANGE',
+        storeId,
+        filePath: storeId + '.dig',
+        rangeStart,
+        rangeEnd,
+        chunkId
+      }
+
+      // Send request
+      await stream.sink(async function* () {
+        yield uint8ArrayFromString(JSON.stringify(request))
+      }())
+
+      // Collect response
+      const chunkData = await this.collectChunkResponse(stream, chunkId)
+      
+      if (chunkData) {
+        chunks.set(chunkIndex, chunkData)
+        this.logger.debug(`✅ Chunk ${chunkIndex} downloaded: ${chunkData.length} bytes`)
+        return true
+      } else {
+        this.logger.warn(`❌ Chunk ${chunkIndex} download failed from ${peerId}`)
+        return false
+      }
+    } catch (error) {
+      this.logger.error(`❌ Chunk ${chunkIndex} error from ${peerId}:`, error)
+      return false
+    }
+  }
+
+  // Execute downloads with controlled concurrency
+  private async executeConcurrentDownloads(tasks: Promise<boolean>[], maxConcurrency: number): Promise<boolean[]> {
+    const results: boolean[] = []
+    const executing: Promise<boolean>[] = []
+
+    for (const task of tasks) {
+      const promise = task.then(result => {
+        executing.splice(executing.indexOf(promise), 1)
+        return result
+      })
+      
+      results.push(await promise)
+      executing.push(promise)
+
+      if (executing.length >= maxConcurrency) {
+        await Promise.race(executing)
+      }
+    }
+
+    await Promise.all(executing)
+    return results
+  }
+
+  // Collect chunk response from stream
+  private async collectChunkResponse(stream: Stream, expectedChunkId: string): Promise<Buffer | null> {
+    try {
+      const chunks: Uint8Array[] = []
+      let headerParsed = false
+      let responseHeader: DIGResponse | null = null
+
+      for await (const chunk of stream.source) {
+        const chunkBytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray())
+        
+        if (!headerParsed) {
+          // First chunk should contain JSON response header
+          const chunkStr = uint8ArrayToString(chunkBytes)
+          const lines = chunkStr.split('\n')
+          
+          try {
+            responseHeader = JSON.parse(lines[0])
+            if (!responseHeader?.success || responseHeader.chunkId !== expectedChunkId) {
+              this.logger.warn(`Invalid chunk response header:`, responseHeader)
+              return null
+            }
+            
+            headerParsed = true
+            
+            // If there's data after the header line, include it
+            if (lines.length > 1) {
+              const remainingData = lines.slice(1).join('\n')
+              if (remainingData) {
+                chunks.push(uint8ArrayFromString(remainingData))
+              }
+            }
+          } catch (parseError) {
+            this.logger.error(`Failed to parse chunk response header:`, parseError)
+            return null
+          }
+        } else {
+          // Subsequent chunks are file data
+          chunks.push(chunkBytes)
+        }
+      }
+
+      if (chunks.length > 0) {
+        return Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
+      }
+
+      return null
+    } catch (error) {
+      this.logger.error(`Error collecting chunk response:`, error)
+      return null
+    }
+  }
+
+  // Assemble chunks into complete file
+  private assembleChunks(chunks: Map<number, Buffer>, totalChunks: number): Buffer | null {
+    try {
+      const orderedChunks: Buffer[] = []
+      
+      for (let i = 0; i < totalChunks; i++) {
+        const chunk = chunks.get(i)
+        if (!chunk) {
+          this.logger.error(`Missing chunk ${i} during assembly`)
+          return null
+        }
+        orderedChunks.push(chunk)
+      }
+
+      return Buffer.concat(orderedChunks)
+    } catch (error) {
+      this.logger.error(`Chunk assembly failed:`, error)
+      return null
+    }
+  }
+
+  // Get file size from peer for parallel download planning
+  private async getFileSizeFromPeer(peerId: string, storeId: string): Promise<number | null> {
+    try {
+      // Request file metadata to get size
+      const digFile = this.digFiles.get(storeId)
+      if (digFile) {
+        return digFile.content.length // We already have it locally
+      }
+
+      // TODO: Implement remote size request
+      // For now, return null to use regular download
+      return null
+    } catch (error) {
+      this.logger.error(`Failed to get file size from ${peerId}:`, error)
+      return null
+    }
+  }
+
+  // Save downloaded store to filesystem
+  private async saveDownloadedStore(storeId: string, content: Buffer): Promise<void> {
+    try {
+      const filePath = join(this.digPath, `${storeId}.dig`)
+      await writeFile(filePath, content)
+      
+      // Load the file into memory
+      await this.loadDIGFile(filePath)
+      
+      this.logger.info(`💾 Saved downloaded store: ${storeId} (${content.length} bytes)`)
+    } catch (error) {
+      this.logger.error(`Failed to save downloaded store ${storeId}:`, error)
+      throw error
     }
   }
 
@@ -1484,8 +2088,16 @@ export class DIGNode {
       return;
     }
 
+    const bootstrapUrl = this.config.discoveryServers[0];
+    
+    // Check if we're trying to connect to ourselves
+    const bootstrapPort = this.getBootstrapPort()
+    if (this.isSelfRelay(bootstrapUrl, bootstrapPort)) {
+      this.logger.info('⏭️ WebSocket relay disabled (discovery server points to self)')
+      return
+    }
+
     try {
-      const bootstrapUrl = this.config.discoveryServers[0];
       this.webSocketRelay = new WebSocketRelay(bootstrapUrl, this.node.peerId.toString());
       
       await this.webSocketRelay.connect();

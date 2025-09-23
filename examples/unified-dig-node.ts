@@ -13,14 +13,12 @@ async function main() {
   // Configuration for unified node
   const config = {
     port: parseInt(process.env.DIG_PORT || '4001'),
-    digPath: process.env.DIG_PATH || undefined,
+    digPath: process.env.DIG_PATH || (process.env.NODE_ENV === 'production' ? '/app/dig' : undefined),
     
-    // Bootstrap from other DIG nodes (not central servers)
+    // Bootstrap from DIG network (AWS EBS instance + other DIG nodes)
     discoveryServers: process.env.DIG_BOOTSTRAP_NODES ? 
       process.env.DIG_BOOTSTRAP_NODES.split(',') : [
-        // Add known DIG node bootstrap servers here
-        // 'http://peer1.example.com:5001',
-        // 'http://peer2.example.com:5001'
+        'http://dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com'
       ],
     
     // Enable all capabilities
@@ -28,7 +26,7 @@ async function main() {
     enableDht: true,
     enableGlobalDiscovery: true,
     enableTurnServer: true,
-    turnPort: parseInt(process.env.DIG_TURN_PORT || '5001'),
+    turnPort: parseInt(process.env.TURN_PORT || '3478'),
     
     // Optional manual connections
     connectToPeers: process.env.DIG_CONNECT_PEERS ? 

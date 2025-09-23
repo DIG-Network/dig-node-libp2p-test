@@ -1,5 +1,5 @@
 // React/Vue hooks for DIG Network integration
-import { DIGNetworkClient } from './DIGClient';
+import { DIGNetworkClient } from './DIGClient.js';
 // React hooks (if using React)
 export function useDIGContent(identifier, client) {
     // This would be a proper React hook implementation

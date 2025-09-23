@@ -33,11 +33,32 @@ export interface DIGNodeConfig {
   turnPort?: number; // Port for TURN server functionality
 }
 
+export interface NodeCapabilities {
+  libp2p: boolean;
+  dht: boolean;
+  mdns: boolean;
+  upnp: boolean;
+  autonat: boolean;
+  webrtc: boolean;
+  websockets: boolean;
+  circuitRelay: boolean;
+  turnServer: boolean;
+  bootstrapServer: boolean;
+  storeSync: boolean;
+  e2eEncryption: boolean;
+  protocolVersion: string;
+  environment: 'development' | 'production' | 'aws';
+}
+
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'HANDSHAKE';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE';
   storeId?: string;
   filePath?: string;
   urn?: string;
+  // Byte range support for parallel downloads
+  rangeStart?: number;
+  rangeEnd?: number;
+  chunkId?: string; // Unique identifier for this chunk request
   // Protocol negotiation
   protocolVersion?: string;
   supportedFeatures?: string[];
@@ -53,6 +74,12 @@ export interface DIGResponse {
   storeId?: string;
   files?: string[];
   metadata?: any;
+  // Byte range support
+  rangeStart?: number;
+  rangeEnd?: number;
+  totalSize?: number;
+  chunkId?: string;
+  isPartial?: boolean;
   // Protocol negotiation response
   protocolVersion?: string;
   supportedFeatures?: string[];

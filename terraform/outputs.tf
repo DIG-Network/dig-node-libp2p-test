@@ -40,7 +40,11 @@ output "estimated_monthly_cost" {
   description = "Estimated monthly cost in USD"
   value = var.instance_type == "t3.nano" ? "$3.80" : (
     var.instance_type == "t3.micro" ? "$7.59" : (
-      var.instance_type == "t2.nano" ? "$4.18" : "$8.35"
+      var.instance_type == "t3.small" ? "$15.18" : (
+        var.instance_type == "t3.medium" ? "$30.37" : (
+          var.instance_type == "t2.nano" ? "$4.18" : "$8.35"
+        )
+      )
     )
   )
 }
@@ -75,5 +79,14 @@ output "monitoring_urls" {
     stats     = "http://${aws_elastic_beanstalk_environment.dig_bootstrap_env.cname}/stats"
     topology  = "http://${aws_elastic_beanstalk_environment.dig_bootstrap_env.cname}/topology"
     peers     = "http://${aws_elastic_beanstalk_environment.dig_bootstrap_env.cname}/peers"
+  }
+}
+
+output "storage_info" {
+  description = "Storage configuration for DIG files"
+  value = {
+    storage_type   = "container"
+    container_path = "/app/dig"
+    note          = "Using container storage with graceful degradation"
   }
 }

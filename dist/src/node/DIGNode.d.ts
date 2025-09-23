@@ -1,5 +1,5 @@
 import type { Libp2p } from 'libp2p';
-import { DIGNodeConfig } from './types.js';
+import { DIGNodeConfig, NodeCapabilities } from './types.js';
 export declare class DIGNode {
     private config;
     private node;
@@ -18,6 +18,7 @@ export declare class DIGNode {
     private webSocketRelay;
     private e2eEncryption;
     private peerProtocolVersions;
+    private nodeCapabilities;
     private requestCounts;
     private app;
     private httpServer;
@@ -30,6 +31,11 @@ export declare class DIGNode {
     private readonly PEER_TIMEOUT;
     private metrics;
     constructor(config?: DIGNodeConfig);
+    private ensureDigDirectory;
+    private detectEnvironment;
+    private safeServiceInit;
+    getCapabilities(): NodeCapabilities;
+    private addOptionalService;
     private getBootstrapServerHost;
     private createCircuitRelayAddress;
     start(): Promise<void>;
@@ -43,6 +49,7 @@ export declare class DIGNode {
     private setupBuiltInBootstrapServer;
     private startBuiltInBootstrapServer;
     private getBootstrapPort;
+    private isSelfRelay;
     private handleProtocolHandshake;
     private checkTurnCapability;
     private initiateProtocolHandshake;
@@ -51,6 +58,7 @@ export declare class DIGNode {
     private isRateLimited;
     private handleDIGRequest;
     private serveFileFromURN;
+    private serveFileRange;
     private serveFileFromStore;
     private handleDiscoveryRequest;
     private announceStores;
@@ -73,6 +81,13 @@ export declare class DIGNode {
     private discoverPeerStores;
     private syncStores;
     private downloadStoreFromPeers;
+    private downloadStoreInParallelFromPeers;
+    private downloadChunkFromLibP2PPeer;
+    private executeConcurrentDownloads;
+    private collectChunkResponse;
+    private assembleChunks;
+    private getFileSizeFromPeer;
+    private saveDownloadedStore;
     private downloadStoreFromLibP2PPeer;
     private downloadStoreViaTurnServers;
     private startGlobalDiscovery;

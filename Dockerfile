@@ -42,7 +42,7 @@ COPY --from=builder /app/dist ./dist
 RUN chown -R dignode:nodejs /app
 USER dignode
 
-# Expose port
+# Expose port for HTTP bootstrap server
 EXPOSE 3000
 
 # Health check
@@ -56,5 +56,5 @@ ENV PORT=3000
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start the unified DIG node (P2P + Bootstrap + TURN + Encryption)
-CMD ["node", "dist/examples/unified-dig-node.js"]
+# Start dedicated bootstrap server for AWS EBS
+CMD ["node", "dist/examples/dedicated-bootstrap.js"]

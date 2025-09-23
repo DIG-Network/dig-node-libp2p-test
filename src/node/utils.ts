@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { ParsedURN } from './types'
+import { ParsedURN } from './types.js'
 
 /**
  * Generate cryptographic IPv6 address from public key

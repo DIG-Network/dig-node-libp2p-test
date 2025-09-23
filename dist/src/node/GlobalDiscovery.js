@@ -1,4 +1,4 @@
-import { Logger } from './logger';
+import { Logger } from './logger.js';
 export class GlobalDiscovery {
     constructor(peerId, addresses, cryptoIPv6, getStores, customBootstrapServers) {
         this.peerId = peerId;
@@ -10,9 +10,9 @@ export class GlobalDiscovery {
         this.discoveryServers = [];
         this.registrationInterval = null;
         this.discoveryInterval = null;
-        // Default discovery servers - use the deployed bootstrap server
+        // Use DIG network bootstrap servers (AWS EBS instance as primary)
         this.discoveryServers = customBootstrapServers || [
-            'http://dig-bootstrap-prod.eba-rdpk2jmt.us-east-1.elasticbeanstalk.com'
+            'http://dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com'
         ];
         this.logger.info(`🌍 Using discovery servers: ${this.discoveryServers.join(', ')}`);
     }

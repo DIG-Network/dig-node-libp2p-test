@@ -1,4 +1,4 @@
-import { DIGNetworkClient } from './DIGClient';
+import { DIGNetworkClient } from './DIGClient.js';
 export declare function useDIGContent(identifier: string, client?: DIGNetworkClient): {
     download: () => Promise<ArrayBuffer | null>;
     test: () => Promise<boolean>;

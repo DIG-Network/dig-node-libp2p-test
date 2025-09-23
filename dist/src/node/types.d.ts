@@ -25,11 +25,30 @@ export interface DIGNodeConfig {
     enableTurnServer?: boolean;
     turnPort?: number;
 }
+export interface NodeCapabilities {
+    libp2p: boolean;
+    dht: boolean;
+    mdns: boolean;
+    upnp: boolean;
+    autonat: boolean;
+    webrtc: boolean;
+    websockets: boolean;
+    circuitRelay: boolean;
+    turnServer: boolean;
+    bootstrapServer: boolean;
+    storeSync: boolean;
+    e2eEncryption: boolean;
+    protocolVersion: string;
+    environment: 'development' | 'production' | 'aws';
+}
 export interface DIGRequest {
-    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'HANDSHAKE';
+    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE';
     storeId?: string;
     filePath?: string;
     urn?: string;
+    rangeStart?: number;
+    rangeEnd?: number;
+    chunkId?: string;
     protocolVersion?: string;
     supportedFeatures?: string[];
     publicKey?: string;
@@ -43,6 +62,11 @@ export interface DIGResponse {
     storeId?: string;
     files?: string[];
     metadata?: any;
+    rangeStart?: number;
+    rangeEnd?: number;
+    totalSize?: number;
+    chunkId?: string;
+    isPartial?: boolean;
     protocolVersion?: string;
     supportedFeatures?: string[];
     publicKey?: string;
