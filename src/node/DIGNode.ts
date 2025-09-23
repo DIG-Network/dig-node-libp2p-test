@@ -1990,10 +1990,10 @@ export class DIGNode {
         throw new Error('No bootstrap server configured')
       }
 
-      // First, find which peer has the store
-      const peersResponse = await fetch(`${bootstrapUrl}/peers?includeStores=true&includeCapabilities=true`)
+      // First, find which peer has the store (use crypto-IPv6 directory for privacy)
+      const peersResponse = await fetch(`${bootstrapUrl}/crypto-ipv6-directory`)
       if (!peersResponse.ok) {
-        throw new Error('Failed to get peers from bootstrap')
+        throw new Error('Failed to get peers from bootstrap crypto-IPv6 directory')
       }
 
       const peersData = await peersResponse.json()
@@ -2008,7 +2008,38 @@ export class DIGNode {
 
       this.logger.info(`☁️ Found store ${storeId} on peer ${sourcePeer.peerId}, using bootstrap TURN`)
 
-      // Request bootstrap server to act as TURN relay
+      // Try direct HTTP bootstrap TURN first (more reliable)
+      const directTurnResponse = await fetch(`${bootstrapUrl}/bootstrap-turn-direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeId,
+          fromPeerId: sourcePeer.peerId,
+          toPeerId: this.node.peerId.toString()
+        })
+      })
+
+      if (directTurnResponse.ok) {
+        const directTurnData = await directTurnResponse.json()
+        if (directTurnData.success && directTurnData.sourceAddresses) {
+          this.logger.info(`📡 Bootstrap provided ${directTurnData.sourceAddresses.length} addresses for direct connection`)
+          
+          // Try to connect directly to source peer using provided addresses
+          for (const address of directTurnData.sourceAddresses) {
+            try {
+              const success = await this.downloadStoreFromSpecificAddress(storeId, sourcePeer.peerId, address)
+              if (success) {
+                this.logger.info(`✅ Downloaded ${storeId} via bootstrap TURN direct connection`)
+                return true
+              }
+            } catch (error) {
+              // Silent failure - try next address
+            }
+          }
+        }
+      }
+
+      // Fallback to WebSocket-based bootstrap TURN relay
       const turnResponse = await fetch(`${bootstrapUrl}/bootstrap-turn-relay`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

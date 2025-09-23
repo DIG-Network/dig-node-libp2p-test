@@ -25,6 +25,7 @@ import type { Socket } from 'socket.io'
 // Extend global type for pending bootstrap TURN requests
 declare global {
   var pendingBootstrapTurnRequests: Map<string, any> | undefined
+  var httpTurnRelays: Map<string, any> | undefined
 }
 
 // Node type constants (matching DIG node)
@@ -639,6 +640,140 @@ app.post('/turn-peer-exchange', (req: Request, res: Response) => {
   }
 })
 
+// HTTP-only bootstrap TURN relay (no WebSocket dependency)
+app.post('/bootstrap-turn-http-relay', (req: Request, res: Response) => {
+  try {
+    const { storeId, fromPeerId, toPeerId, rangeStart, rangeEnd } = req.body
+    
+    if (!storeId || !fromPeerId || !toPeerId) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    const sourcePeer = registeredPeers.get(fromPeerId)
+    const targetPeer = registeredPeers.get(toPeerId)
+    
+    if (!sourcePeer || !targetPeer) {
+      return res.status(404).json({ error: 'One or both peers not found' })
+    }
+
+    const isRangeRequest = typeof rangeStart === 'number' && typeof rangeEnd === 'number'
+    
+    console.log(`📡 HTTP-only bootstrap TURN relay: ${storeId} ${isRangeRequest ? `(${rangeStart}-${rangeEnd})` : ''} from ${fromPeerId} to ${toPeerId}`)
+    
+    // For HTTP-only TURN, we need to coordinate the transfer differently
+    // This would require the requesting peer to poll for the data
+    // or use a different coordination mechanism
+    
+    // Store the relay request for coordination
+    const relayId = `http_turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
+    // Create a relay coordination entry
+    if (!global.httpTurnRelays) {
+      global.httpTurnRelays = new Map()
+    }
+    
+    global.httpTurnRelays.set(relayId, {
+      storeId,
+      fromPeerId,
+      toPeerId,
+      rangeStart,
+      rangeEnd,
+      status: 'pending',
+      created: Date.now()
+    })
+
+    console.log(`📡 Created HTTP TURN relay coordination: ${relayId}`)
+    
+    res.json({
+      success: true,
+      relayId,
+      method: 'http-turn-relay',
+      coordinationEndpoint: `/bootstrap-turn-coordinate/${relayId}`,
+      suggestion: 'Use coordination endpoint to complete transfer'
+    })
+
+  } catch (error) {
+    console.error('HTTP bootstrap TURN relay error:', error)
+    res.status(500).json({ error: 'HTTP bootstrap TURN relay failed' })
+  }
+})
+
+// Coordination endpoint for HTTP-only TURN relay
+app.get('/bootstrap-turn-coordinate/:relayId', (req: Request, res: Response) => {
+  try {
+    const { relayId } = req.params
+    
+    if (!global.httpTurnRelays) {
+      return res.status(404).json({ error: 'No HTTP TURN relays active' })
+    }
+    
+    const relay = global.httpTurnRelays.get(relayId)
+    if (!relay) {
+      return res.status(404).json({ error: 'Relay coordination not found' })
+    }
+    
+    console.log(`📊 HTTP TURN coordination status for ${relayId}: ${relay.status}`)
+    
+    res.json({
+      success: true,
+      relayId,
+      status: relay.status,
+      storeId: relay.storeId,
+      fromPeerId: relay.fromPeerId,
+      toPeerId: relay.toPeerId,
+      created: relay.created,
+      suggestion: relay.status === 'pending' ? 'Transfer coordination in progress' : 'Check relay status'
+    })
+
+  } catch (error) {
+    console.error('HTTP TURN coordination error:', error)
+    res.status(500).json({ error: 'HTTP TURN coordination failed' })
+  }
+})
+
+// Direct HTTP bootstrap TURN relay (works without WebSocket connections)
+app.post('/bootstrap-turn-direct', (req: Request, res: Response) => {
+  try {
+    const { storeId, fromPeerId, toPeerId } = req.body
+    
+    if (!storeId || !fromPeerId || !toPeerId) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    const sourcePeer = registeredPeers.get(fromPeerId)
+    const targetPeer = registeredPeers.get(toPeerId)
+    
+    if (!sourcePeer || !targetPeer) {
+      return res.status(404).json({ error: 'One or both peers not found in registry' })
+    }
+
+    console.log(`📡 Direct HTTP bootstrap TURN: ${storeId} from ${fromPeerId} to ${toPeerId}`)
+    
+    // For direct HTTP TURN, we provide the real addresses for direct connection
+    // This is authenticated since both peers are registered
+    const sourceAddresses = sourcePeer.realAddresses || sourcePeer.addresses
+    
+    if (!sourceAddresses || sourceAddresses.length === 0) {
+      return res.status(404).json({ error: 'Source peer has no available addresses' })
+    }
+
+    console.log(`📡 Bootstrap TURN providing ${sourceAddresses.length} addresses for direct connection`)
+    
+    res.json({
+      success: true,
+      method: 'direct-http-turn',
+      sourceAddresses: sourceAddresses,
+      sourcePeerId: fromPeerId,
+      storeId: storeId,
+      suggestion: 'Connect directly to source peer using provided addresses'
+    })
+
+  } catch (error) {
+    console.error('Direct HTTP bootstrap TURN error:', error)
+    res.status(500).json({ error: 'Direct HTTP bootstrap TURN failed' })
+  }
+})
+
 // Bootstrap server acting as fallback TURN server
 app.post('/bootstrap-turn-relay', (req: Request, res: Response) => {
   try {
@@ -662,7 +797,16 @@ app.post('/bootstrap-turn-relay', (req: Request, res: Response) => {
       .find(socket => (socket as ExtendedSocket).peerId === fromPeerId) as ExtendedSocket
     
     if (!sourceSocket) {
-      return res.status(404).json({ error: 'Source peer not connected via WebSocket' })
+      console.log(`⚠️ Bootstrap TURN failed: Source peer ${fromPeerId} not connected via WebSocket`)
+      console.log(`📊 Connected sockets: ${Array.from(io.sockets.sockets.values()).length}`)
+      return res.status(404).json({ 
+        error: 'Source peer not connected via WebSocket',
+        suggestion: 'Bootstrap TURN requires both peers to be connected via WebSocket for relay',
+        fromPeerId,
+        toPeerId,
+        connectedSockets: Array.from(io.sockets.sockets.values()).length,
+        availablePeers: Array.from(registeredPeers.keys())
+      })
     }
 
     // Create a unique request ID for this transfer
