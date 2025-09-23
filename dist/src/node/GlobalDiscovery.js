@@ -1,16 +1,16 @@
 import { Logger } from './logger.js';
 export class GlobalDiscovery {
-    constructor(peerId, addresses, cryptoIPv6, getStores, customBootstrapServers, privacyMode = false) {
+    constructor(peerId, addresses, cryptoIPv6, getStores, customBootstrapServers) {
         this.peerId = peerId;
         this.addresses = addresses;
         this.cryptoIPv6 = cryptoIPv6;
         this.getStores = getStores;
-        this.privacyMode = privacyMode;
         this.logger = new Logger('GlobalDiscovery');
         this.knownPeers = new Map();
         this.discoveryServers = [];
         this.registrationInterval = null;
         this.discoveryInterval = null;
+        // 🔐 PRIVACY IS ALWAYS ENABLED - No option to disable
         // Use DIG network bootstrap servers (AWS EBS instance as primary)
         this.discoveryServers = customBootstrapServers || [
             'http://dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com'
@@ -51,24 +51,31 @@ export class GlobalDiscovery {
     }
     // Register this node with discovery servers (crypto-IPv6 only for privacy)
     async registerWithDiscoveryServers() {
-        const registration = this.privacyMode ? {
+        // 🔐 ALWAYS use privacy mode to protect IP addresses
+        const registration = {
             peerId: this.peerId,
             // 🔐 PRIVACY: Only expose crypto-derived IPv6, never real IP addresses
-            addresses: [`/ip6/${this.cryptoIPv6}/tcp/4001`, `/ip6/${this.cryptoIPv6}/ws`],
-            realAddresses: this.addresses, // Send real addresses privately for resolution
+            addresses: [`/ip6/${this.cryptoIPv6}/tcp/4001/p2p/${this.peerId}`, `/ip6/${this.cryptoIPv6}/ws/p2p/${this.peerId}`],
+            realAddresses: this.addresses, // Send real addresses privately for resolution only
             cryptoIPv6: this.cryptoIPv6,
             stores: this.getStores(),
             timestamp: Date.now(),
             version: '1.0.0',
-            privacyMode: true // Flag to indicate crypto-IPv6-only mode
-        } : {
-            peerId: this.peerId,
-            addresses: this.addresses, // Normal mode: expose real addresses
-            cryptoIPv6: this.cryptoIPv6,
-            stores: this.getStores(),
-            timestamp: Date.now(),
-            version: '1.0.0',
-            privacyMode: false
+            privacyMode: true, // ALWAYS true for IP privacy
+            capabilities: {
+                libp2p: true,
+                dht: true,
+                storeSync: true,
+                e2eEncryption: true,
+                turnServer: false, // Will be updated by TURN detection
+                bootstrapServer: false // Will be updated by bootstrap detection
+            },
+            // Enhanced handshake information (Chia-like protocol)
+            networkId: process.env.DIG_NETWORK_ID || 'mainnet',
+            softwareVersion: process.env.npm_package_version || '1.0.0',
+            serverPort: 4001, // Default DIG port
+            nodeType: 0, // Will be determined by capabilities
+            capabilityList: [] // Will be populated with capability codes
         };
         for (const server of this.discoveryServers) {
             try {
@@ -98,8 +105,8 @@ export class GlobalDiscovery {
         const discoveredAddresses = [];
         for (const server of this.discoveryServers) {
             try {
-                // Use crypto-IPv6 directory in privacy mode for enhanced privacy
-                const endpoint = this.privacyMode ? '/crypto-ipv6-directory' : '/peers';
+                // 🔐 ALWAYS use crypto-IPv6 directory for privacy
+                const endpoint = '/crypto-ipv6-directory';
                 const response = await fetch(`${server}${endpoint}`, {
                     signal: AbortSignal.timeout(10000)
                 });
@@ -108,19 +115,19 @@ export class GlobalDiscovery {
                     if (data.peers && Array.isArray(data.peers)) {
                         for (const peer of data.peers) {
                             if (peer.peerId !== this.peerId) {
-                                // In privacy mode, construct crypto-IPv6 addresses
+                                // 🔐 ALWAYS construct crypto-IPv6 addresses (privacy mandatory)
                                 let peerAddresses = [];
-                                if (this.privacyMode && peer.cryptoIPv6) {
-                                    // 🔐 PRIVACY: Use crypto-IPv6 addresses only
+                                if (peer.cryptoIPv6) {
+                                    // 🔐 PRIVACY: Always use crypto-IPv6 addresses only
                                     peerAddresses = [
                                         `/ip6/${peer.cryptoIPv6}/tcp/4001/p2p/${peer.peerId}`,
                                         `/ip6/${peer.cryptoIPv6}/ws/p2p/${peer.peerId}`
                                     ];
-                                    this.logger.debug(`🔐 Privacy mode: Using crypto-IPv6 for ${peer.peerId}: ${peer.cryptoIPv6}`);
+                                    this.logger.debug(`🔐 Using crypto-IPv6 for ${peer.peerId}: ${peer.cryptoIPv6}`);
                                 }
-                                else if (peer.addresses) {
-                                    // Normal mode: use provided addresses
-                                    peerAddresses = peer.addresses;
+                                else {
+                                    this.logger.warn(`⚠️ Peer ${peer.peerId} has no crypto-IPv6 address - skipping for privacy`);
+                                    continue; // Skip peers without crypto-IPv6
                                 }
                                 if (peerAddresses.length > 0) {
                                     this.knownPeers.set(peer.peerId, {
@@ -130,7 +137,7 @@ export class GlobalDiscovery {
                                     });
                                     // Add addresses for connection attempts
                                     discoveredAddresses.push(...peerAddresses);
-                                    this.logger.debug(`👤 Discovered peer: ${peer.peerId} with ${peerAddresses.length} addresses (privacy: ${this.privacyMode})`);
+                                    this.logger.debug(`👤 Discovered peer: ${peer.peerId} with ${peerAddresses.length} crypto-IPv6 addresses`);
                                 }
                             }
                             else if (peer.peerId === this.peerId) {

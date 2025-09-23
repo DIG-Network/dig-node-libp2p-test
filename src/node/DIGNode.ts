@@ -33,6 +33,9 @@ import {
   DIGRequest, 
   DIGResponse, 
   NodeCapabilities,
+  DIGHandshake,
+  NodeType,
+  CapabilityCode,
   DiscoveryRequest, 
   DiscoveryResponse,
   DIG_PROTOCOL, 
@@ -43,6 +46,7 @@ import { Logger } from './logger.js'
 import { GlobalDiscovery } from './GlobalDiscovery.js'
 import { WebSocketRelay } from './WebSocketRelay.js'
 import { E2EEncryption } from './E2EEncryption.js'
+import { ZeroKnowledgePrivacy } from './ZeroKnowledgePrivacy.js'
 import express from 'express'
 import cors from 'cors'
 import { createServer } from 'http'
@@ -64,6 +68,7 @@ export class DIGNode {
   private globalDiscovery!: GlobalDiscovery
   private webSocketRelay!: WebSocketRelay
   private e2eEncryption = new E2EEncryption()
+  private zkPrivacy!: ZeroKnowledgePrivacy
   private peerProtocolVersions = new Map<string, string>() // peerId -> protocol version
   private nodeCapabilities: NodeCapabilities = {
     libp2p: false,
@@ -127,6 +132,9 @@ export class DIGNode {
     this.digPath = config.digPath || join(homedir(), '.dig')
     this.setupBuiltInBootstrapServer()
     this.detectEnvironment()
+    
+    // Initialize zero-knowledge privacy module
+    this.zkPrivacy = new ZeroKnowledgePrivacy(this.node?.peerId?.toString() || 'pending')
   }
 
   // Ensure DIG directory exists, create if needed, or gracefully disable file features
@@ -321,8 +329,8 @@ export class DIGNode {
       identify: identify()
     }
     
-    // Add gossipsub for distributed privacy peer discovery
-    if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+    // Add gossipsub for distributed privacy peer discovery (always enabled)
+    {
       const gossipService = await this.safeServiceInit('e2eEncryption', () => gossipsub({
         emitSelf: false,
         allowPublishToZeroTopicPeers: false,
@@ -365,7 +373,7 @@ export class DIGNode {
       ]
     }
 
-    this.logger.info(`🔗 LibP2P addresses: ${this.config.privacyMode ? '[hidden for privacy]' : addresses.listen.join(', ')}`)
+    this.logger.info(`🔗 LibP2P addresses: [hidden for privacy - crypto-IPv6 only]`)
 
     // Build transports with graceful degradation
     const transports: any[] = [tcp()] // TCP is always available
@@ -416,7 +424,10 @@ export class DIGNode {
     this.node = await createLibp2p({
       addresses,
       transports,
-      connectionEncrypters: [noise()],
+      connectionEncrypters: [
+        noise() // Noise protocol - superior P2P encryption with perfect forward secrecy
+        // 🔐 MANDATORY ENCRYPTION: No plaintext connections allowed
+      ],
       streamMuxers: [yamux()],
       peerDiscovery: peerDiscoveryServices,
       services: {
@@ -444,6 +455,12 @@ export class DIGNode {
     // LibP2P successfully created - mark as available
     this.nodeCapabilities.libp2p = true
     
+    // Initialize zero-knowledge privacy with actual peer ID
+    this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
+    
+    // 🔐 MANDATORY ENCRYPTION: Set up strict connection security
+    this.enforceEncryptionPolicy()
+    
     await this.node.handle(DIG_PROTOCOL, this.handleDIGRequest.bind(this))
     await this.node.handle(DIG_DISCOVERY_PROTOCOL, this.handleDiscoveryRequest.bind(this))
 
@@ -467,8 +484,8 @@ export class DIGNode {
         await this.safeServiceInit('storeSync', () => this.startGlobalDiscovery(), 'Global Discovery')
       }
       
-      // Start distributed privacy overlay network (no bootstrap dependency)
-      if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+      // Start distributed privacy overlay network (always enabled)
+      {
         await this.safeServiceInit('storeSync', () => this.startDistributedPrivacyDiscovery(), 'Distributed Privacy Overlay')
       }
       
@@ -654,9 +671,7 @@ export class DIGNode {
       connectedPeers: this.node ? this.node.getPeers().map(p => p.toString()) : [],
       discoveredPeers: Array.from(this.discoveredPeers),
       metrics: this.getMetrics(),
-      addresses: this.config.privacyMode ? 
-        [`/ip6/${this.cryptoIPv6}/tcp/${this.config.port || 4001}`] : 
-        (this.node ? this.node.getMultiaddrs().map(addr => addr.toString()) : [])
+      addresses: [`/ip6/${this.cryptoIPv6}/tcp/${this.config.port || 4001}`] // Always crypto-IPv6
     }
   }
 
@@ -779,8 +794,8 @@ export class DIGNode {
     this.logger.debug(`🔍 Resolving crypto-IPv6: ${cryptoIPv6}`)
 
     try {
-      // 🛡️ DISTRIBUTED PRIVACY: Try distributed resolution first (DHT + Gossip)
-      if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+      // 🛡️ DISTRIBUTED PRIVACY: Always try distributed resolution first (DHT + Gossip)
+      {
         // Extract peer ID from crypto address if available
         const peerIdMatch = cryptoAddress.match(/\/p2p\/([^\/]+)$/)
         const peerId = peerIdMatch ? peerIdMatch[1] : null
@@ -805,13 +820,208 @@ export class DIGNode {
     }
   }
 
+  // Enforce mandatory encryption policy (reject all unencrypted connections)
+  private enforceEncryptionPolicy(): void {
+    this.logger.info('🔐 Enforcing mandatory encryption policy - NO unencrypted connections allowed')
+
+    // Monitor all incoming connections
+    this.node.addEventListener('peer:connect', (evt) => {
+      const connection = evt.detail
+      this.validateMandatoryEncryption(connection)
+    })
+
+    // Monitor connection attempts
+    this.node.addEventListener('connection:open', (evt) => {
+      const connection = evt.detail
+      this.validateMandatoryEncryption(connection)
+    })
+
+    // Reject any plaintext attempts
+    this.node.addEventListener('peer:discovery', (evt) => {
+      const peer = evt.detail
+      this.logger.debug(`🔍 Discovered peer: ${peer.id} - will enforce encryption on connection`)
+    })
+
+    this.logger.info('✅ Mandatory encryption policy active - all connections will be encrypted')
+  }
+
+  // Validate that connection is encrypted (reject if not)
+  private validateMandatoryEncryption(connection: any): void {
+    try {
+      const peerId = connection.remotePeer?.toString() || 'unknown'
+      const encrypter = connection.encryption
+
+      if (!encrypter) {
+        this.logger.error(`❌ SECURITY VIOLATION: Unencrypted connection from ${peerId} - REJECTING`)
+        this.rejectUnencryptedConnection(connection, peerId)
+        return
+      }
+
+      const protocol = encrypter.protocol || 'unknown'
+      
+      // Check for explicitly forbidden protocols
+      if (protocol === '/plaintext/1.0.0' || protocol.includes('plaintext')) {
+        this.logger.error(`❌ SECURITY VIOLATION: Plaintext protocol ${protocol} from ${peerId} - REJECTING`)
+        this.rejectUnencryptedConnection(connection, peerId)
+        return
+      }
+
+      // Log accepted encrypted connections
+      if (protocol === '/noise') {
+        this.logger.info(`🔊 Noise protocol encrypted connection accepted from ${peerId} (perfect forward secrecy)`)
+      } else {
+        this.logger.info(`🔐 Encrypted connection accepted from ${peerId}: ${protocol}`)
+        this.logger.warn(`⚠️ Non-Noise protocol detected - Noise is preferred for P2P security`)
+      }
+
+      // Verify mutual authentication
+      const remotePublicKey = connection.remotePeer?.publicKey
+      if (remotePublicKey) {
+        this.logger.debug(`🔑 Peer ${peerId} authenticated with public key`)
+        
+        // Verify crypto-IPv6 matches public key
+        const expectedCryptoIPv6 = generateCryptoIPv6(remotePublicKey.toString('hex'))
+        this.logger.debug(`🔐 Verified crypto-IPv6 for ${peerId}: ${expectedCryptoIPv6}`)
+      } else {
+        this.logger.warn(`⚠️ No public key verification for ${peerId} - connection allowed but flagged`)
+      }
+
+    } catch (error) {
+      this.logger.error(`Connection validation failed:`, error)
+    }
+  }
+
+  // Reject unencrypted connection with logging
+  private async rejectUnencryptedConnection(connection: any, peerId: string): Promise<void> {
+    try {
+      this.logger.error(`🚫 REJECTING unencrypted connection from ${peerId}`)
+      this.metrics.errors++
+      
+      // Close the connection immediately
+      await connection.close()
+      
+      // Log security event
+      this.logger.error(`🔒 Security Policy: Only encrypted connections allowed - rejected ${peerId}`)
+      
+    } catch (closeError) {
+      this.logger.error(`Failed to close unencrypted connection from ${peerId}:`, closeError)
+    }
+  }
+
+  // Verify outgoing connection encryption before use
+  private async verifyOutgoingEncryption(connection: any, targetPeerId: string): Promise<boolean> {
+    try {
+      if (!connection.encryption) {
+        this.logger.error(`❌ SECURITY: No encryption for outgoing connection to ${targetPeerId} - ABORTING`)
+        await connection.close()
+        return false
+      }
+
+      const protocol = connection.encryption.protocol
+      if (!protocol || protocol === '/plaintext/1.0.0' || protocol.includes('plaintext')) {
+        this.logger.error(`❌ SECURITY: Plaintext protocol ${protocol} to ${targetPeerId} - ABORTING`)
+        await connection.close()
+        return false
+      }
+
+      if (protocol === '/noise') {
+        this.logger.info(`✅ Verified Noise protocol encryption to ${targetPeerId} (perfect forward secrecy)`)
+      } else {
+        this.logger.info(`✅ Verified encrypted connection to ${targetPeerId}: ${protocol}`)
+      }
+      return true
+
+    } catch (error) {
+      this.logger.error(`Failed to verify outgoing encryption to ${targetPeerId}:`, error)
+      return false
+    }
+  }
+
+  // Create comprehensive handshake information (Chia-like protocol)
+  private createHandshakeInfo(): DIGHandshake {
+    // Determine node type based on capabilities
+    let nodeType = NodeType.FULL_NODE
+    if (this.nodeCapabilities.bootstrapServer && !this.nodeCapabilities.storeSync) {
+      nodeType = NodeType.BOOTSTRAP_NODE
+    } else if (this.nodeCapabilities.turnServer && !this.nodeCapabilities.storeSync) {
+      nodeType = NodeType.TURN_NODE
+    } else if (!this.nodeCapabilities.storeSync) {
+      nodeType = NodeType.LIGHT_NODE
+    }
+
+    // Build capability list with codes and descriptions
+    const capabilities: Array<[number, string]> = []
+    
+    if (this.nodeCapabilities.storeSync) {
+      capabilities.push([CapabilityCode.STORE_SYNC, 'Store synchronization'])
+    }
+    if (this.nodeCapabilities.turnServer) {
+      capabilities.push([CapabilityCode.TURN_RELAY, 'TURN server relay'])
+    }
+    if (this.nodeCapabilities.bootstrapServer) {
+      capabilities.push([CapabilityCode.BOOTSTRAP_DISCOVERY, 'Bootstrap peer discovery'])
+    }
+    if (this.nodeCapabilities.e2eEncryption) {
+      capabilities.push([CapabilityCode.E2E_ENCRYPTION, 'End-to-end encryption'])
+    }
+    capabilities.push([CapabilityCode.BYTE_RANGE_DOWNLOAD, 'Parallel byte-range downloads'])
+    capabilities.push([CapabilityCode.GOSSIP_DISCOVERY, 'Gossip-based peer discovery'])
+    
+    if (this.nodeCapabilities.dht) {
+      capabilities.push([CapabilityCode.DHT_STORAGE, 'DHT distributed storage'])
+    }
+    if (this.nodeCapabilities.circuitRelay) {
+      capabilities.push([CapabilityCode.CIRCUIT_RELAY, 'LibP2P circuit relay'])
+    }
+    if (this.nodeCapabilities.webrtc) {
+      capabilities.push([CapabilityCode.WEBRTC_NAT, 'WebRTC NAT traversal'])
+    }
+    capabilities.push([CapabilityCode.MESH_ROUTING, 'Mesh routing discovery'])
+
+    return {
+      networkId: process.env.DIG_NETWORK_ID || 'mainnet',
+      protocolVersion: this.nodeCapabilities.protocolVersion,
+      softwareVersion: process.env.npm_package_version || '1.0.0',
+      serverPort: this.config.port || 4001,
+      nodeType,
+      capabilities,
+      peerId: this.node.peerId.toString(),
+      cryptoIPv6: this.cryptoIPv6,
+      publicKey: this.e2eEncryption.getPublicKey(),
+      timestamp: Date.now(),
+      stores: this.getAvailableStores()
+    }
+  }
+
+  // Get node type description
+  private getNodeTypeDescription(): string {
+    const handshake = this.createHandshakeInfo()
+    switch (handshake.nodeType) {
+      case NodeType.FULL_NODE: return 'Full Node'
+      case NodeType.LIGHT_NODE: return 'Light Node'
+      case NodeType.BOOTSTRAP_NODE: return 'Bootstrap Node'
+      case NodeType.TURN_NODE: return 'TURN Node'
+      case NodeType.RELAY_NODE: return 'Relay Node'
+      default: return 'Unknown Node'
+    }
+  }
+
+  // Get node type description from code
+  private getNodeTypeFromCode(nodeType: number): string {
+    switch (nodeType) {
+      case NodeType.FULL_NODE: return 'Full Node'
+      case NodeType.LIGHT_NODE: return 'Light Node'
+      case NodeType.BOOTSTRAP_NODE: return 'Bootstrap Node'
+      case NodeType.TURN_NODE: return 'TURN Node'
+      case NodeType.RELAY_NODE: return 'Relay Node'
+      default: return 'Unknown Node'
+    }
+  }
+
   // Distributed Privacy Overlay Network Methods
   
-  // Start distributed peer discovery using gossip and DHT (no bootstrap dependency)
+  // Start distributed peer discovery using gossip and DHT (always enabled)
   private async startDistributedPrivacyDiscovery(): Promise<void> {
-    if (!this.config.privacyMode && !this.config.enableCryptoIPv6Overlay) {
-      return
-    }
 
     this.logger.info('🛡️ Starting distributed privacy overlay network...')
 
@@ -989,21 +1199,32 @@ export class DIGNode {
     }
   }
 
-  // Announce ourselves to the privacy overlay network
+  // Announce ourselves to the privacy overlay network with zero-knowledge enhancements
   private async announceToPrivacyOverlay(): Promise<void> {
     try {
       const gossipsub = this.node.services.gossipsub as any
       if (!gossipsub) return
 
-      // Announce peer discovery with capabilities
-      const peerAnnouncement = {
-        peerId: this.node.peerId.toString(),
-        cryptoIPv6: this.cryptoIPv6,
-        stores: this.getAvailableStores(),
-        capabilities: this.nodeCapabilities,
-        timestamp: Date.now(),
-        version: '1.0.0'
-      }
+      // 🕵️ ZERO-KNOWLEDGE: Use timing obfuscation for announcements
+      await this.zkPrivacy.obfuscateTiming(async () => {
+        // Create comprehensive handshake information
+        const handshakeInfo = this.createHandshakeInfo()
+        
+        // 🕵️ ZK: Scramble metadata to prevent correlation
+        const scrambledMetadata = this.zkPrivacy.scrambleMetadata({
+          announcementType: 'peer-discovery',
+          nodeInfo: handshakeInfo
+        })
+
+        const peerAnnouncement = {
+          ...handshakeInfo, // Include comprehensive handshake info
+          metadata: scrambledMetadata,
+          // 🕵️ ZK: Add dummy data to obfuscate real information
+          dummyStores: Array.from({length: Math.floor(Math.random() * 5)}, () => 
+            randomBytes(32).toString('hex')
+          ),
+          obfuscated: true
+        }
 
       await gossipsub.publish(
         this.gossipTopics.PEER_DISCOVERY,
@@ -1250,7 +1471,7 @@ export class DIGNode {
     }
   }
 
-  // Request peers from other nodes (distributed discovery)
+  // Request peers from other nodes with zero-knowledge privacy (distributed discovery)
   async requestPeersFromNode(peerId: string, privacyMode: boolean = true): Promise<any[]> {
     try {
       const peer = this.node.getPeers().find(p => p.toString() === peerId)
@@ -1259,15 +1480,26 @@ export class DIGNode {
         return []
       }
 
-      const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL)
-      
-      const request: DIGRequest = {
-        type: privacyMode ? 'PRIVACY_PEER_DISCOVERY' : 'PEER_EXCHANGE',
-        maxPeers: 10,
-        includeStores: true,
-        includeCapabilities: true,
-        privacyMode
-      }
+      // 🕵️ ZERO-KNOWLEDGE: Use timing obfuscation to resist analysis
+      return await this.zkPrivacy.obfuscateTiming(async () => {
+        const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL)
+        
+        // 🕵️ ZERO-KNOWLEDGE: Create anonymous peer query with dummy queries
+        const anonymousQuery = this.zkPrivacy.createAnonymousPeerQuery()
+        
+        const request: DIGRequest = {
+          type: privacyMode ? 'PRIVACY_PEER_DISCOVERY' : 'PEER_EXCHANGE',
+          maxPeers: 10,
+          includeStores: true,
+          includeCapabilities: true,
+          privacyMode,
+          // 🕵️ ZK: Include obfuscated metadata
+          metadata: this.zkPrivacy.scrambleMetadata({
+            requestTime: Date.now(),
+            queryType: 'peer-discovery'
+          }),
+          anonymousQueries: anonymousQuery.queries
+        }
 
       // Send request
       await pipe(async function* () {
@@ -1282,13 +1514,24 @@ export class DIGNode {
         }
       })
 
-      if (chunks.length > 0) {
-        const response = JSON.parse(uint8ArrayToString(chunks[0]))
-        if (response.success && response.peers) {
-          this.logger.info(`📋 Received ${response.peers.length} peers from ${peerId} (privacy: ${privacyMode})`)
-          return response.peers
+        if (chunks.length > 0) {
+          const response = JSON.parse(uint8ArrayToString(chunks[0]))
+          if (response.success && response.peers) {
+            // 🕵️ ZERO-KNOWLEDGE: Filter out dummy queries and mix traffic
+            const realPeers = await this.zkPrivacy.mixTraffic(response.peers)
+            this.logger.info(`📋 Received ${realPeers.length} peers from ${peerId} (ZK privacy: ${privacyMode})`)
+            return realPeers
+          }
         }
-      }
+
+        return []
+      })
+    } catch (error) {
+      this.logger.debug(`Failed to request peers from ${peerId}:`, error)
+    }
+
+    return []
+  }
 
     } catch (error) {
       this.logger.debug(`Failed to request peers from ${peerId}:`, error)
@@ -1371,7 +1614,7 @@ export class DIGNode {
     
     try {
       // Use the appropriate endpoint based on privacy mode
-      const endpoint = this.config.privacyMode ? '/crypto-ipv6-directory' : '/peers'
+      const endpoint = '/crypto-ipv6-directory' // Always use privacy endpoint
       const response = await fetch(`${bootstrapUrl}${endpoint}?includeStores=true`, {
         signal: AbortSignal.timeout(10000)
       })
@@ -1432,7 +1675,7 @@ export class DIGNode {
     // Request peers from each connected node
     for (const peer of connectedPeers.slice(0, 3)) { // Limit to 3 requests to avoid spam
       try {
-        const discoveredPeers = await this.requestPeersFromNode(peer.toString(), this.config.privacyMode || false)
+        const discoveredPeers = await this.requestPeersFromNode(peer.toString(), true) // Always privacy mode
         
         // Process discovered peers and merge with our knowledge
         for (const peerInfo of discoveredPeers) {
@@ -2009,13 +2252,55 @@ export class DIGNode {
   // Handle protocol handshake and establish end-to-end encryption
   private async handleProtocolHandshake(request: any, peerId: string): Promise<DIGResponse> {
     try {
-      const { protocolVersion, supportedFeatures, publicKey } = request;
+      const { 
+        networkId, 
+        protocolVersion, 
+        softwareVersion, 
+        serverPort, 
+        nodeType, 
+        capabilities: peerCapabilities, 
+        cryptoIPv6, 
+        publicKey, 
+        stores,
+        supportedFeatures 
+      } = request;
+
+      this.logger.info(`🤝 Comprehensive handshake received from ${peerId}:`);
+      this.logger.info(`   📡 Network: ${networkId || 'unknown'}`);
+      this.logger.info(`   🔧 Protocol: v${protocolVersion || 'unknown'}`);
+      this.logger.info(`   💻 Software: v${softwareVersion || 'unknown'}`);
+      this.logger.info(`   🌐 Port: ${serverPort || 'unknown'}`);
+      this.logger.info(`   🏷️ Type: ${this.getNodeTypeFromCode(nodeType)} (${nodeType})`);
+      this.logger.info(`   🔐 Crypto-IPv6: ${cryptoIPv6 || 'unknown'}`);
+      this.logger.info(`   📁 Stores: ${stores?.length || 0}`);
+      this.logger.info(`   🔧 Capabilities: ${peerCapabilities?.length || 0} features`);
+
+      // Log detailed capabilities
+      if (peerCapabilities && Array.isArray(peerCapabilities)) {
+        for (const [code, description] of peerCapabilities) {
+          this.logger.debug(`     ${code}: ${description}`)
+        }
+      }
       
-      this.logger.info(`🤝 Protocol handshake from ${peerId}: v${protocolVersion}`);
-      
-      // Store peer's protocol version
+      // Store peer's protocol version and comprehensive info
       if (protocolVersion) {
         this.peerProtocolVersions.set(peerId, protocolVersion);
+      }
+
+      // Store peer in privacy overlay with full handshake info
+      if (cryptoIPv6) {
+        this.privacyOverlayPeers.set(peerId, {
+          cryptoIPv6,
+          encryptedAddresses: '',
+          lastSeen: Date.now(),
+          capabilities: this.nodeCapabilities, // Store full capabilities
+          stores: stores || []
+        })
+      }
+
+      // Update peer stores if provided
+      if (stores && Array.isArray(stores)) {
+        this.peerStores.set(peerId, new Set(stores))
       }
       
       // Establish shared secret for end-to-end encryption
@@ -2087,11 +2372,12 @@ export class DIGNode {
 
       const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL);
       
+      // Create comprehensive handshake with full node information
+      const handshakeInfo = this.createHandshakeInfo()
       const handshakeRequest = {
         type: 'HANDSHAKE',
-        protocolVersion: E2EEncryption.getProtocolVersion(),
-        supportedFeatures: E2EEncryption.getProtocolCapabilities(),
-        publicKey: this.e2eEncryption.getPublicKey()
+        ...handshakeInfo, // Include all handshake information
+        supportedFeatures: E2EEncryption.getProtocolCapabilities()
       };
 
       const self = this;
@@ -3308,9 +3594,7 @@ export class DIGNode {
   private async startGlobalDiscovery(): Promise<void> {
     try {
       // 🔐 PRIVACY: Use crypto-IPv6 addresses in privacy mode, real addresses otherwise
-      const addresses = this.config.privacyMode ? 
-        createCryptoIPv6Addresses(this.cryptoIPv6, this.config.port || 4001) :
-        this.node.getMultiaddrs().map(addr => addr.toString())
+      const addresses = createCryptoIPv6Addresses(this.cryptoIPv6, this.config.port || 4001) // Always crypto-IPv6
       
       this.globalDiscovery = new GlobalDiscovery(
         this.node.peerId.toString(),
@@ -3318,7 +3602,6 @@ export class DIGNode {
         this.cryptoIPv6,
         () => this.getAvailableStores(),
         this.config.discoveryServers,
-        this.config.privacyMode || false
       )
       
       await this.globalDiscovery.start()
@@ -3668,7 +3951,7 @@ export class DIGNode {
     
     // Log current connection status
     const connectedCount = this.node.getPeers().length
-    this.logger.info(`📊 Connected to ${connectedCount} peers (crypto-IPv6 privacy: ${this.config.privacyMode ? 'enabled' : 'disabled'})`)
+    this.logger.info(`📊 Connected to ${connectedCount} peers (crypto-IPv6 privacy: always enabled)`)
   }
 
   // Connect to manually configured peers

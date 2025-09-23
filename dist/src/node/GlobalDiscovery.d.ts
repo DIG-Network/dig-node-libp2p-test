@@ -11,13 +11,12 @@ export declare class GlobalDiscovery {
     private addresses;
     private cryptoIPv6;
     private getStores;
-    private privacyMode;
     private logger;
     knownPeers: Map<string, PeerInfo>;
     private discoveryServers;
     private registrationInterval;
     private discoveryInterval;
-    constructor(peerId: string, addresses: string[], cryptoIPv6: string, getStores: () => string[], customBootstrapServers?: string[], privacyMode?: boolean);
+    constructor(peerId: string, addresses: string[], cryptoIPv6: string, getStores: () => string[], customBootstrapServers?: string[]);
     start(): Promise<void>;
     stop(): Promise<void>;
     private registerWithDiscoveryServers;

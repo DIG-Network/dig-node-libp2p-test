@@ -24,8 +24,6 @@ export interface DIGNodeConfig {
     enableGlobalDiscovery?: boolean;
     enableTurnServer?: boolean;
     turnPort?: number;
-    privacyMode?: boolean;
-    enableCryptoIPv6Overlay?: boolean;
 }
 export interface NodeCapabilities {
     libp2p: boolean;
@@ -43,8 +41,40 @@ export interface NodeCapabilities {
     protocolVersion: string;
     environment: 'development' | 'production' | 'aws';
 }
+export interface DIGHandshake {
+    networkId: string;
+    protocolVersion: string;
+    softwareVersion: string;
+    serverPort: number;
+    nodeType: number;
+    capabilities: Array<[number, string]>;
+    peerId: string;
+    cryptoIPv6: string;
+    publicKey: string;
+    timestamp: number;
+    stores: string[];
+}
+export declare enum NodeType {
+    FULL_NODE = 0,// Full DIG node with all capabilities
+    LIGHT_NODE = 1,// Light node (limited storage)
+    BOOTSTRAP_NODE = 2,// Bootstrap/discovery server
+    TURN_NODE = 3,// Dedicated TURN server
+    RELAY_NODE = 4
+}
+export declare enum CapabilityCode {
+    STORE_SYNC = 1,// Can sync .dig stores
+    TURN_RELAY = 2,// Can act as TURN server
+    BOOTSTRAP_DISCOVERY = 3,// Can provide peer discovery
+    E2E_ENCRYPTION = 4,// Supports end-to-end encryption
+    BYTE_RANGE_DOWNLOAD = 5,// Supports parallel byte-range downloads
+    GOSSIP_DISCOVERY = 6,// Supports gossip-based peer discovery
+    DHT_STORAGE = 7,// Supports DHT storage
+    CIRCUIT_RELAY = 8,// Supports LibP2P circuit relay
+    WEBRTC_NAT = 9,// Supports WebRTC NAT traversal
+    MESH_ROUTING = 10
+}
 export interface DIGRequest {
-    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY';
+    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION';
     storeId?: string;
     filePath?: string;
     urn?: string;

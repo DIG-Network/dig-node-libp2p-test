@@ -6,9 +6,11 @@ async function main() {
   console.log('🔗 LibP2P P2P Network');
   console.log('🌐 Bootstrap Server'); 
   console.log('📡 TURN Server');
-  console.log('🔐 End-to-End Encryption');
+  console.log('🔐 Mandatory Noise Encryption');
   console.log('📁 File Sharing & Sync');
-  console.log('🛡️ Crypto-IPv6 Privacy Network');
+  console.log('🛡️ Mandatory Crypto-IPv6 Privacy');
+  console.log('🕵️ Zero-Knowledge Features');
+  console.log('⚠️ ALL PRIVACY FEATURES MANDATORY');
   console.log('');
 
   // Configuration for unified node
@@ -29,9 +31,8 @@ async function main() {
     enableTurnServer: true,
     turnPort: parseInt(process.env.TURN_PORT || '3478'),
     
-    // 🔐 PRIVACY MODE: Only expose crypto-IPv6 addresses, hide real IPs
-    privacyMode: process.env.DIG_PRIVACY_MODE === 'true',
-    enableCryptoIPv6Overlay: process.env.DIG_CRYPTO_IPV6_OVERLAY === 'true',
+    // 🔐 ALL PRIVACY FEATURES MANDATORY: Crypto-IPv6, Zero-Knowledge, Noise Encryption
+    // No configuration options - privacy cannot be disabled
     
     // Optional manual connections
     connectToPeers: process.env.DIG_CONNECT_PEERS ? 

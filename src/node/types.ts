@@ -31,8 +31,8 @@ export interface DIGNodeConfig {
   enableGlobalDiscovery?: boolean;
   enableTurnServer?: boolean; // Act as TURN server for other nodes
   turnPort?: number; // Port for TURN server functionality
-  privacyMode?: boolean; // Only use crypto-IPv6 addresses, hide real IPs
-  enableCryptoIPv6Overlay?: boolean; // Create IPv6 overlay network
+  // 🔐 ALL PRIVACY FEATURES ARE MANDATORY (graceful degradation only if unsupported)
+  // No configuration options to disable privacy - it's always enabled
 }
 
 export interface NodeCapabilities {
@@ -52,8 +52,46 @@ export interface NodeCapabilities {
   environment: 'development' | 'production' | 'aws';
 }
 
+// Enhanced handshake information (similar to Chia network protocol)
+export interface DIGHandshake {
+  networkId: string;                    // Network id: mainnet, testnet, devnet
+  protocolVersion: string;              // Protocol version for message compatibility
+  softwareVersion: string;              // Software version for feature support
+  serverPort: number;                   // Port the server is listening on
+  nodeType: number;                     // Node type: 0=full, 1=light, 2=bootstrap, 3=turn
+  capabilities: Array<[number, string]>; // Capability codes with descriptions
+  peerId: string;                       // LibP2P peer ID
+  cryptoIPv6: string;                   // Crypto-derived IPv6 address
+  publicKey: string;                    // Public key for encryption
+  timestamp: number;                    // Handshake timestamp
+  stores: string[];                     // Available stores
+}
+
+// Node type constants
+export enum NodeType {
+  FULL_NODE = 0,      // Full DIG node with all capabilities
+  LIGHT_NODE = 1,     // Light node (limited storage)
+  BOOTSTRAP_NODE = 2, // Bootstrap/discovery server
+  TURN_NODE = 3,      // Dedicated TURN server
+  RELAY_NODE = 4      // Relay-only node
+}
+
+// Capability codes (similar to Chia's capability system)
+export enum CapabilityCode {
+  STORE_SYNC = 1,           // Can sync .dig stores
+  TURN_RELAY = 2,           // Can act as TURN server
+  BOOTSTRAP_DISCOVERY = 3,  // Can provide peer discovery
+  E2E_ENCRYPTION = 4,       // Supports end-to-end encryption
+  BYTE_RANGE_DOWNLOAD = 5,  // Supports parallel byte-range downloads
+  GOSSIP_DISCOVERY = 6,     // Supports gossip-based peer discovery
+  DHT_STORAGE = 7,          // Supports DHT storage
+  CIRCUIT_RELAY = 8,        // Supports LibP2P circuit relay
+  WEBRTC_NAT = 9,           // Supports WebRTC NAT traversal
+  MESH_ROUTING = 10         // Supports mesh routing
+}
+
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION';
   storeId?: string;
   filePath?: string;
   urn?: string;
