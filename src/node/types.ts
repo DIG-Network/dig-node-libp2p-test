@@ -91,7 +91,7 @@ export enum CapabilityCode {
 }
 
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES';
   storeId?: string;
   filePath?: string;
   urn?: string;
@@ -112,6 +112,12 @@ export interface DIGRequest {
   // Zero-knowledge privacy fields
   metadata?: any;
   anonymousQueries?: any[];
+  // Security verification fields
+  challengeNonce?: string;
+  requestedProof?: string[];
+  networkId?: string;
+  isDIGNode?: boolean;
+  requestedInfo?: string[];
 }
 
 export interface DIGResponse {
@@ -138,6 +144,11 @@ export interface DIGResponse {
   totalPeers?: number;
   privacyMode?: boolean;
   timestamp?: number;
+  // Security verification response
+  networkId?: string;
+  isDIGNode?: boolean;
+  capabilities?: any;
+  cryptoIPv6?: string;
 }
 
 export interface DIGPeer {

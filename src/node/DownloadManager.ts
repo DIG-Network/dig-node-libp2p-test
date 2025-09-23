@@ -293,208 +293,30 @@ export class DownloadManager {
     }
   }
 
-  // Download chunk from TURN server (FULL PRODUCTION IMPLEMENTATION)
+  // Download chunk from TURN server (simplified)
   private async downloadChunkFromTurn(storeId: string, rangeStart: number, rangeEnd: number, source: DownloadSource): Promise<Buffer | null> {
     try {
-      if (!source.url || !this.digNode) {
-        throw new Error('TURN server URL or DIGNode reference not provided')
+      if (!source.url) {
+        throw new Error('TURN server URL not provided')
       }
 
-      this.logger.debug(`📡 Downloading chunk via TURN server: ${source.peerId} (${rangeStart}-${rangeEnd})`)
+      this.logger.debug(`📡 TURN chunk download: ${source.peerId} (${rangeStart}-${rangeEnd})`)
 
-      // First, find which peer has the store
-      const peersResponse = await fetch(`${source.url}/crypto-ipv6-directory`)
-      if (!peersResponse.ok) {
-        throw new Error('Failed to get peers for TURN coordination')
+      // Use unified TURN coordination instead of duplicate logic
+      const turnCoordination = this.digNode.turnCoordination
+      if (turnCoordination) {
+        return await turnCoordination.requestChunk(storeId, rangeStart, rangeEnd, source.peerId)
       }
 
-      const peersData = await peersResponse.json()
-      const sourcePeer = peersData.peers?.find((p: any) => 
-        p.peerId !== this.digNode.node.peerId.toString() && 
-        p.stores?.includes(storeId)
-      )
-
-      if (!sourcePeer) {
-        throw new Error('No peer found with the store for TURN relay')
-      }
-
-      // Request chunk via TURN server relay with byte range
-      const response = await fetch(`${source.url}/relay-store`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          storeId,
-          fromPeerId: sourcePeer.peerId,
-          toPeerId: this.digNode.node.peerId.toString(),
-          turnServerId: source.peerId,
-          rangeStart,
-          rangeEnd,
-          chunkId: `turn_chunk_${Math.floor(rangeStart / 262144)}_${Date.now()}`,
-          totalSize: this.activeDownloads.get(storeId)?.totalSize
-        }),
-        signal: AbortSignal.timeout(30000)
-      })
-
-      if (response.ok) {
-        const responseData = await response.json()
-        
-        if (responseData.success && responseData.method) {
-          this.logger.debug(`📡 TURN relay coordinated via ${responseData.method}`)
-          
-          // If we got TURN server info, make direct request
-          if (responseData.turnServer) {
-            return await this.downloadChunkFromTurnDirect(storeId, rangeStart, rangeEnd, responseData.turnServer, sourcePeer)
-          }
-        }
-        
-        // If response contains binary data directly
-        const arrayBuffer = await response.arrayBuffer()
-        const chunkData = Buffer.from(arrayBuffer)
-        
-        // Validate chunk size
-        const expectedSize = rangeEnd - rangeStart + 1
-        if (chunkData.length !== expectedSize) {
-          this.logger.warn(`⚠️ TURN chunk size mismatch: expected ${expectedSize}, got ${chunkData.length}`)
-        }
-
-        this.logger.debug(`✅ TURN chunk downloaded: ${chunkData.length} bytes from ${source.peerId}`)
-        return chunkData
-      } else {
-        throw new Error(`TURN server response: ${response.status}`)
-      }
+      throw new Error('TURN coordination not available')
 
     } catch (error) {
-      this.logger.debug(`TURN chunk download failed from ${source.peerId}:`, error)
+      this.logger.debug(`TURN chunk download failed:`, error)
       return null
     }
   }
 
-  // Download chunk directly from TURN server (FULL PRODUCTION IMPLEMENTATION)
-  private async downloadChunkFromTurnDirect(storeId: string, rangeStart: number, rangeEnd: number, turnServer: any, sourcePeer: any): Promise<Buffer | null> {
-    try {
-      this.logger.debug(`📡 Direct TURN download from ${turnServer.addresses?.[0]} (${rangeStart}-${rangeEnd})`)
-      
-      if (!this.digNode || !turnServer.addresses || turnServer.addresses.length === 0) {
-        throw new Error('Invalid TURN server configuration')
-      }
-
-      // 1. Establish direct connection to TURN server peer
-      const turnPeer = this.digNode.node.getPeers().find((p: any) => 
-        turnServer.addresses.some((addr: string) => addr.includes(p.toString()))
-      )
-
-      if (turnPeer) {
-        // Direct LibP2P connection to TURN server
-        const stream = await this.digNode.node.dialProtocol(turnPeer, '/dig/1.0.0')
-        
-        // 2. Request chunk relay from source peer through TURN server
-        const turnRelayRequest = {
-          type: 'TURN_RELAY_REQUEST',
-          storeId,
-          sourcePeerId: sourcePeer.peerId,
-          targetPeerId: this.digNode.node.peerId.toString(),
-          rangeStart,
-          rangeEnd,
-          chunkId: `direct_turn_${Math.floor(rangeStart / 262144)}_${Date.now()}`
-        }
-
-        const { pipe } = await import('it-pipe')
-        const { fromString: uint8ArrayFromString, toString: uint8ArrayToString } = await import('uint8arrays')
-
-        await pipe(async function* () {
-          yield uint8ArrayFromString(JSON.stringify(turnRelayRequest))
-        }, stream.sink)
-
-        // 3. Receive encrypted chunk data
-        const chunks: Uint8Array[] = []
-        await pipe(stream.source, async function (source: any) {
-          for await (const chunk of source) {
-            chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray()))
-          }
-        })
-
-        if (chunks.length > 0) {
-          // Parse TURN relay response
-          const responseText = uint8ArrayToString(chunks[0])
-          const lines = responseText.split('\n')
-          const headerLine = lines[0]
-          
-          let response
-          try {
-            response = JSON.parse(headerLine)
-          } catch {
-            throw new Error('Invalid TURN response format')
-          }
-
-          if (!response.success) {
-            throw new Error(response.error || 'TURN relay failed')
-          }
-
-          // Extract encrypted chunk data
-          const headerLength = Buffer.from(headerLine + '\n').length
-          const encryptedChunkData = Buffer.concat(chunks.map(c => Buffer.from(c))).subarray(headerLength)
-
-          // 4. Decrypt using E2E encryption
-          let chunkData: Buffer
-          if (this.digNode.e2eEncryption.hasSharedSecret(sourcePeer.peerId)) {
-            try {
-              const encryptedBase64 = encryptedChunkData.toString('base64')
-              const decryptedData = this.digNode.e2eEncryption.decryptFromPeer(sourcePeer.peerId, encryptedBase64)
-              chunkData = decryptedData
-              this.logger.debug(`🔐 Decrypted TURN chunk from ${sourcePeer.peerId}`)
-            } catch (decryptError) {
-              this.logger.warn(`Failed to decrypt TURN chunk:`, decryptError)
-              chunkData = encryptedChunkData // Use unencrypted as fallback
-            }
-          } else {
-            chunkData = encryptedChunkData
-            this.logger.warn(`⚠️ No encryption key for ${sourcePeer.peerId}, using unencrypted TURN data`)
-          }
-
-          // Validate chunk size
-          const expectedSize = rangeEnd - rangeStart + 1
-          if (chunkData.length !== expectedSize) {
-            this.logger.warn(`⚠️ Direct TURN chunk size mismatch: expected ${expectedSize}, got ${chunkData.length}`)
-          }
-
-          this.logger.debug(`✅ Direct TURN chunk downloaded: ${chunkData.length} bytes`)
-          return chunkData
-        }
-      }
-
-      // Fallback to HTTP-based TURN coordination if direct connection fails
-      this.logger.debug(`🔄 Direct TURN connection failed, using HTTP coordination`)
-      
-      // Make HTTP request to TURN server's bootstrap endpoint
-      const turnServerUrl = `http://${turnServer.addresses[0].split('/')[2]}`
-      const response = await fetch(`${turnServerUrl}/turn-relay-chunk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          storeId,
-          sourcePeerId: sourcePeer.peerId,
-          targetPeerId: this.digNode.node.peerId.toString(),
-          rangeStart,
-          rangeEnd
-        }),
-        signal: AbortSignal.timeout(30000)
-      })
-
-      if (response.ok) {
-        const arrayBuffer = await response.arrayBuffer()
-        const chunkData = Buffer.from(arrayBuffer)
-        
-        this.logger.debug(`✅ HTTP TURN chunk downloaded: ${chunkData.length} bytes`)
-        return chunkData
-      }
-
-      throw new Error('Both direct and HTTP TURN methods failed')
-
-    } catch (error) {
-      this.logger.debug(`Direct TURN chunk download failed:`, error)
-      return null
-    }
-  }
+  // Removed downloadChunkFromTurnDirect - functionality moved to UnifiedTurnCoordination
 
   // Download chunk from bootstrap server
   private async downloadChunkFromBootstrap(storeId: string, rangeStart: number, rangeEnd: number, source: DownloadSource): Promise<Buffer | null> {

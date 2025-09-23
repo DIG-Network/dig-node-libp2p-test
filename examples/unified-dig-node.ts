@@ -48,25 +48,22 @@ async function main() {
     console.log('');
     console.log('📊 Services Running:');
     console.log(`   🔗 P2P Network: port ${config.port}`);
-    console.log(`   🌐 Bootstrap Server: port ${config.port + 1000}`);
-    console.log(`   📡 TURN Server: port ${config.turnPort}`);
+    console.log(`   📡 TURN Coordination: ${node.getCapabilities().turnServer ? 'enabled' : 'disabled'}`);
     console.log(`   🔐 E2E Encryption: enabled`);
+    console.log(`   🌐 Uses dedicated bootstrap server (not built-in)`);
     console.log('');
     console.log('🌍 Network Features:');
-    console.log('   ✅ Peer-to-peer file sharing');
-    console.log('   ✅ Bootstrap server for other nodes');
-    console.log('   ✅ TURN server for NAT traversal');
+    console.log('   ✅ Unified peer discovery (public LibP2P + DIG filtering)');
+    console.log('   ✅ Unified TURN coordination (decentralized)');
     console.log('   ✅ End-to-end encrypted transfers');
-    console.log('   ✅ Protocol version negotiation');
+    console.log('   ✅ Resumable parallel downloads');
+    console.log('   ✅ Zero-knowledge privacy features');
     console.log('   ✅ Automatic store synchronization');
-    console.log('   ✅ Real-time file watching');
     console.log('');
-    console.log('🔗 Other nodes can connect to this node at:');
-    console.log(`   Bootstrap: http://[YOUR_IP]:${config.port + 1000}`);
+    console.log('🔗 Connection methods:');
     console.log(`   P2P: /ip4/[YOUR_IP]/tcp/${config.port}/p2p/[PEER_ID]`);
-    console.log('');
-    console.log('💡 To connect from another machine:');
-    console.log(`   DIG_BOOTSTRAP_NODES="http://[THIS_IP]:${config.port + 1000}" npm run unified`);
+    console.log(`   Crypto-IPv6: /ip6/${node.getCryptoIPv6()}/tcp/${config.port}`);
+    console.log('   Bootstrap: Uses dedicated AWS server');
     
     // Enhanced status logging
     setInterval(() => {
