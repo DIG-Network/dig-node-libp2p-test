@@ -19,6 +19,7 @@ export declare class DIGNode {
     private e2eEncryption;
     private zkPrivacy;
     private downloadManager;
+    private onDemandTurn;
     private peerProtocolVersions;
     private nodeCapabilities;
     private requestCounts;

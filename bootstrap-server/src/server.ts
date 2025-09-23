@@ -992,6 +992,63 @@ io.on('connection', (socket: Socket) => {
     }
   })
 
+  // Handle TURN chunk responses (CRITICAL - this was missing!)
+  socket.on('turn-chunk-response', (data: any) => {
+    const { requestId, success, error, chunkData, size } = data
+    
+    if (!global.pendingBootstrapTurnRequests) {
+      console.log(`⚠️ No pending requests map for TURN chunk response ${requestId}`)
+      return
+    }
+    
+    const pendingRequest = global.pendingBootstrapTurnRequests.get(requestId)
+    if (!pendingRequest) {
+      console.log(`⚠️ No pending request found for TURN chunk response ${requestId}`)
+      return
+    }
+    
+    // Clear timeout
+    clearTimeout(pendingRequest.timeout)
+    global.pendingBootstrapTurnRequests.delete(requestId)
+    
+    const { res, startTime } = pendingRequest
+    const duration = Date.now() - startTime
+    
+    if (res.headersSent) {
+      console.log(`⚠️ HTTP response already sent for request ${requestId}`)
+      return
+    }
+    
+    if (!success || error) {
+      console.log(`❌ TURN chunk relay failed for ${requestId}: ${error}`)
+      return res.status(500).json({ error: error || 'Chunk retrieval failed' })
+    }
+    
+    if (!chunkData) {
+      console.log(`❌ No chunk data received for ${requestId}`)
+      return res.status(404).json({ error: 'No chunk data received' })
+    }
+    
+    try {
+      // Convert base64 chunk data back to binary
+      const binaryData = Buffer.from(chunkData, 'base64')
+      
+      console.log(`✅ TURN chunk relay completed for ${requestId}: ${binaryData.length} bytes in ${duration}ms`)
+      
+      // Set appropriate headers for chunk data
+      res.setHeader('Content-Type', 'application/octet-stream')
+      res.setHeader('Content-Length', binaryData.length)
+      res.setHeader('Content-Range', `bytes ${pendingRequest.rangeStart || 0}-${pendingRequest.rangeEnd || binaryData.length - 1}/${size || binaryData.length}`)
+      
+      // Send the chunk data
+      res.send(binaryData)
+      
+    } catch (processError) {
+      console.error(`❌ Error processing TURN chunk response for ${requestId}:`, processError)
+      res.status(500).json({ error: 'Failed to process chunk data' })
+    }
+  })
+
   socket.on('disconnect', () => {
     if (extSocket.peerId) {
       console.log(`🔌 Peer ${extSocket.peerId} disconnected`)
@@ -1071,6 +1128,101 @@ async function testPeerConnection(peer: RegisteredPeer): Promise<boolean> {
     return false
   }
 }
+
+// Signal peer to connect to TURN server for on-demand transfer
+app.post('/signal-turn-connection', (req: Request, res: Response) => {
+  try {
+    const { targetPeerId, turnServerInfo, requestId, requesterPeerId, instruction } = req.body
+    
+    if (!targetPeerId || !turnServerInfo || !requestId) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    console.log(`📡 Signaling ${targetPeerId} to connect to TURN server ${turnServerInfo.peerId}`)
+
+    // Find target peer's WebSocket connection
+    const targetSocket = Array.from(io.sockets.sockets.values())
+      .find(socket => (socket as ExtendedSocket).peerId === targetPeerId) as ExtendedSocket
+    
+    if (!targetSocket) {
+      return res.status(404).json({ 
+        error: 'Target peer not connected for signaling',
+        targetPeerId,
+        suggestion: 'Peer must be connected via WebSocket to receive TURN connection signals'
+      })
+    }
+
+    // Send TURN connection signal to target peer
+    targetSocket.emit('turn-connection-signal', {
+      requestId,
+      turnServerInfo,
+      instruction,
+      requesterPeerId,
+      timestamp: Date.now()
+    })
+
+    console.log(`📡 Sent TURN connection signal to ${targetPeerId}`)
+    
+    res.json({
+      success: true,
+      message: `TURN connection signal sent to ${targetPeerId}`,
+      turnServerInfo,
+      requestId
+    })
+
+  } catch (error) {
+    console.error('TURN connection signaling error:', error)
+    res.status(500).json({ error: 'TURN connection signaling failed' })
+  }
+})
+
+// Get available TURN servers for on-demand connections
+app.get('/available-turn-servers', (req: Request, res: Response) => {
+  try {
+    const availableTurnServers = []
+    
+    // Add bootstrap server as TURN option
+    availableTurnServers.push({
+      peerId: 'bootstrap-server',
+      type: 'bootstrap',
+      url: `http://0.0.0.0:${PORT}`,
+      capabilities: ['websocket-relay', 'http-coordination', 'data-validation'],
+      load: Array.from(io.sockets.sockets.values()).length,
+      maxCapacity: 100
+    })
+
+    // Add registered peer TURN servers
+    for (const [peerId, peer] of registeredPeers) {
+      if (peer.turnCapable) {
+        availableTurnServers.push({
+          peerId,
+          type: 'peer',
+          cryptoIPv6: peer.cryptoIPv6,
+          addresses: peer.realAddresses || peer.addresses,
+          capabilities: peer.capabilityList || [],
+          load: peer.turnLoad || 0,
+          maxCapacity: peer.turnCapacity || 10
+        })
+      }
+    }
+
+    // Sort by load (lowest first)
+    availableTurnServers.sort((a, b) => (a.load || 0) - (b.load || 0))
+
+    console.log(`📡 Available TURN servers: ${availableTurnServers.length}`)
+    
+    res.json({
+      success: true,
+      turnServers: availableTurnServers,
+      totalServers: availableTurnServers.length,
+      recommendation: availableTurnServers[0] // Lowest load server
+    })
+
+  } catch (error) {
+    console.error('TURN server discovery error:', error)
+    res.status(500).json({ error: 'Failed to get available TURN servers' })
+  }
+})
 
 // TURN relay chunk endpoint for direct TURN server communication
 app.post('/turn-relay-chunk', (req: Request, res: Response) => {

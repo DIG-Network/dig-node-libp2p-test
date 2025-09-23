@@ -131,6 +131,16 @@ export class WebSocketRelay {
         }
       });
 
+      this.socket.on('turn-chunk-request', (data) => {
+        const { storeId, targetPeerId, rangeStart, rangeEnd, requestId } = data;
+        this.logger.info(`📦 TURN chunk request received: ${storeId} (${rangeStart}-${rangeEnd}) for ${targetPeerId}`);
+        
+        const handler = this.messageHandlers.get('turn-chunk-request');
+        if (handler) {
+          handler({ storeId, targetPeerId, rangeStart, rangeEnd, requestId });
+        }
+      });
+
       this.socket.on('disconnect', () => {
         this.logger.warn('📡 Disconnected from relay server');
       });
@@ -259,6 +269,24 @@ export class WebSocketRelay {
     });
 
     this.logger.debug(`📋 TURN peer exchange response sent for request ${requestId}: ${success ? 'success' : 'failed'}`);
+  }
+
+  // Send TURN chunk response with actual store data
+  sendTurnChunkResponse(requestId: string, success: boolean, chunkData?: string, error?: string): void {
+    if (!this.socket?.connected) {
+      this.logger.error('Cannot send TURN chunk response: not connected');
+      return;
+    }
+
+    this.socket.emit('turn-chunk-response', {
+      requestId,
+      success,
+      chunkData,
+      error,
+      size: chunkData ? Buffer.from(chunkData, 'base64').length : 0
+    });
+
+    this.logger.debug(`📦 TURN chunk response sent for request ${requestId}: ${success ? 'success' : 'failed'}`);
   }
 
   // Get relay server URL

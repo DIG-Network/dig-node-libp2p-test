@@ -30,6 +30,7 @@ import { WebSocketRelay } from './WebSocketRelay.js';
 import { E2EEncryption } from './E2EEncryption.js';
 import { ZeroKnowledgePrivacy } from './ZeroKnowledgePrivacy.js';
 import { DownloadManager } from './DownloadManager.js';
+import { OnDemandTurnConnection } from './OnDemandTurnConnection.js';
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
@@ -104,6 +105,8 @@ export class DIGNode {
         this.zkPrivacy = new ZeroKnowledgePrivacy(this.node?.peerId?.toString() || 'pending');
         // Initialize download manager for resumable downloads
         this.downloadManager = new DownloadManager(this.digPath, this);
+        // Initialize on-demand TURN connection manager
+        this.onDemandTurn = new OnDemandTurnConnection(this);
     }
     // Ensure DIG directory exists, create if needed, or gracefully disable file features
     async ensureDigDirectory() {
@@ -3359,6 +3362,50 @@ export class DIGNode {
                 catch (error) {
                     this.webSocketRelay.sendTurnPeerExchangeResponse(requestId, false, undefined, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
                     this.logger.error(`❌ Error handling TURN peer exchange:`, error);
+                }
+            });
+            // Set up TURN chunk request handler (CRITICAL - this was missing!)
+            this.webSocketRelay.onMessage('turn-chunk-request', async (data) => {
+                const { storeId, targetPeerId, rangeStart, rangeEnd, requestId } = data;
+                this.logger.info(`📦 TURN chunk request: ${storeId} (${rangeStart}-${rangeEnd}) for ${targetPeerId}`);
+                try {
+                    const digFile = this.digFiles.get(storeId);
+                    if (!digFile) {
+                        this.webSocketRelay.sendTurnChunkResponse(requestId, false, undefined, 'Store not found');
+                        this.logger.warn(`❌ Store ${storeId} not found for TURN chunk request`);
+                        return;
+                    }
+                    // Extract the requested byte range
+                    const content = digFile.content;
+                    if (rangeStart < 0 || rangeEnd >= content.length || rangeStart > rangeEnd) {
+                        this.webSocketRelay.sendTurnChunkResponse(requestId, false, undefined, `Invalid range: ${rangeStart}-${rangeEnd}`);
+                        return;
+                    }
+                    const chunkData = content.subarray(rangeStart, rangeEnd + 1);
+                    this.logger.info(`📤 Sending TURN chunk: ${chunkData.length} bytes for ${storeId} (${rangeStart}-${rangeEnd})`);
+                    // Encrypt the chunk data if we have a shared secret with the target peer
+                    let finalData = chunkData;
+                    if (this.e2eEncryption.hasSharedSecret(targetPeerId)) {
+                        try {
+                            const encryptedData = this.e2eEncryption.encryptForPeer(targetPeerId, chunkData);
+                            finalData = Buffer.from(encryptedData, 'base64');
+                            this.logger.info(`🔐 Encrypted TURN chunk for ${targetPeerId}`);
+                        }
+                        catch (encryptError) {
+                            this.logger.error(`❌ Failed to encrypt chunk for ${targetPeerId}:`, encryptError);
+                            // Continue with unencrypted data as fallback
+                        }
+                    }
+                    else {
+                        this.logger.warn(`⚠️ No encryption key for ${targetPeerId}, sending unencrypted TURN chunk`);
+                    }
+                    // Send the chunk data as base64
+                    const base64Data = finalData.toString('base64');
+                    this.webSocketRelay.sendTurnChunkResponse(requestId, true, base64Data);
+                }
+                catch (error) {
+                    this.webSocketRelay.sendTurnChunkResponse(requestId, false, undefined, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    this.logger.error(`❌ Error handling TURN chunk request:`, error);
                 }
             });
         }
