@@ -961,14 +961,27 @@ io.on('connection', (socket: Socket) => {
     }
     
     try {
+      // Validate store data before processing
+      if (typeof storeData !== 'string') {
+        console.log(`❌ Invalid store data type for ${requestId}: ${typeof storeData}`)
+        return res.status(500).json({ error: 'Invalid store data format' })
+      }
+
       // Convert base64 data back to binary
       const binaryData = Buffer.from(storeData, 'base64')
       
+      // Validate data size (185 bytes suggests JSON error response)
+      if (binaryData.length < 1000 && binaryData.toString().includes('{')) {
+        console.log(`❌ Suspected JSON error response (${binaryData.length} bytes): ${binaryData.toString().substring(0, 100)}`)
+        return res.status(500).json({ error: 'Received JSON error instead of store data' })
+      }
+      
       console.log(`✅ Bootstrap TURN relay completed for ${requestId}: ${binaryData.length} bytes in ${duration}ms`)
       
-      // Set appropriate headers
+      // Set appropriate headers for binary data
       res.setHeader('Content-Type', 'application/octet-stream')
       res.setHeader('Content-Length', binaryData.length)
+      res.setHeader('Content-Disposition', `attachment; filename="${storeData.substring(0, 16)}.dig"`)
       
       // Send the binary data
       res.send(binaryData)
@@ -987,22 +1000,144 @@ io.on('connection', (socket: Socket) => {
 })
 
 // Cleanup stale peers periodically
-setInterval(() => {
+// Periodic cleanup and connection testing
+setInterval(async () => {
   const now = Date.now()
   let cleanedCount = 0
+  let testedCount = 0
+  
+  console.log(`🔍 Testing connections to ${registeredPeers.size} registered peers...`)
   
   for (const [peerId, peer] of registeredPeers) {
-    if (now - peer.lastSeen > PEER_TIMEOUT) {
+    // Test if peer is still reachable
+    const isReachable = await testPeerConnection(peer)
+    testedCount++
+    
+    if (!isReachable || now - peer.lastSeen > PEER_TIMEOUT) {
       registeredPeers.delete(peerId)
       turnServers.delete(peerId)
       cleanedCount++
+      console.log(`🧹 Removed unreachable peer: ${peerId}`)
+    } else {
+      console.log(`✅ Peer ${peerId} is reachable`)
     }
   }
   
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned up ${cleanedCount} stale peers`)
+  console.log(`🔍 Connection test complete: ${testedCount} tested, ${cleanedCount} removed, ${registeredPeers.size} active`)
+}, 2 * 60 * 1000) // Every 2 minutes
+
+// Test if a peer is still reachable
+async function testPeerConnection(peer: RegisteredPeer): Promise<boolean> {
+  try {
+    // Check if peer is connected via WebSocket
+    const socket = Array.from(io.sockets.sockets.values())
+      .find(s => (s as ExtendedSocket).peerId === peer.peerId)
+    
+    if (socket && (socket as any).connected) {
+      console.log(`✅ Peer ${peer.peerId} connected via WebSocket`)
+      return true
+    }
+
+    // Test HTTP connectivity to peer's real addresses
+    if (peer.realAddresses && peer.realAddresses.length > 0) {
+      for (const address of peer.realAddresses) {
+        try {
+          // Extract IP and port from multiaddr
+          const match = address.match(/\/ip4\/([^\/]+)\/tcp\/(\d+)/)
+          if (match) {
+            const [, ip, port] = match
+            
+            // Simple HTTP ping to peer's bootstrap server
+            const response = await fetch(`http://${ip}:${parseInt(port) + 1000}/health`, {
+              signal: AbortSignal.timeout(5000)
+            })
+            
+            if (response.ok) {
+              console.log(`✅ Peer ${peer.peerId} reachable via HTTP at ${ip}:${port}`)
+              return true
+            }
+          }
+        } catch (error) {
+          // Silent failure - try next address
+        }
+      }
+    }
+
+    console.log(`⚠️ Peer ${peer.peerId} not reachable via WebSocket or HTTP`)
+    return false
+
+  } catch (error) {
+    console.log(`❌ Connection test failed for ${peer.peerId}:`, error)
+    return false
   }
-}, 5 * 60 * 1000) // Every 5 minutes
+}
+
+// TURN relay chunk endpoint for direct TURN server communication
+app.post('/turn-relay-chunk', (req: Request, res: Response) => {
+  try {
+    const { storeId, sourcePeerId, targetPeerId, rangeStart, rangeEnd } = req.body
+    
+    if (!storeId || !sourcePeerId || !targetPeerId) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    const sourcePeer = registeredPeers.get(sourcePeerId)
+    if (!sourcePeer) {
+      return res.status(404).json({ error: 'Source peer not found' })
+    }
+
+    console.log(`📡 TURN relay chunk: ${storeId} (${rangeStart}-${rangeEnd}) from ${sourcePeerId} to ${targetPeerId}`)
+
+    // Find source peer's WebSocket connection
+    const sourceSocket = Array.from(io.sockets.sockets.values())
+      .find(socket => (socket as ExtendedSocket).peerId === sourcePeerId) as ExtendedSocket
+    
+    if (!sourceSocket) {
+      return res.status(404).json({ 
+        error: 'Source peer not connected for TURN relay',
+        sourcePeerId,
+        suggestion: 'Peer must be connected via WebSocket for chunk relay'
+      })
+    }
+
+    // Create unique request ID for chunk
+    const requestId = `turn_chunk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
+    // Set up response handler
+    const responseTimeout = setTimeout(() => {
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'TURN chunk relay timeout' })
+      }
+    }, 30000)
+
+    // Store pending request
+    if (!global.pendingBootstrapTurnRequests) {
+      global.pendingBootstrapTurnRequests = new Map()
+    }
+    global.pendingBootstrapTurnRequests.set(requestId, {
+      res,
+      timeout: responseTimeout,
+      isRangeRequest: true,
+      requestId,
+      startTime: Date.now()
+    })
+
+    // Request chunk from source peer
+    sourceSocket.emit('turn-chunk-request', {
+      storeId,
+      targetPeerId,
+      rangeStart,
+      rangeEnd,
+      requestId
+    })
+
+    console.log(`📡 Requested chunk from ${sourcePeerId} for TURN relay`)
+
+  } catch (error) {
+    console.error('TURN relay chunk error:', error)
+    res.status(500).json({ error: 'TURN relay chunk failed' })
+  }
+})
 
 // Helper methods for privacy and node information
 function getNodeTypeDescription(nodeType: number): string {

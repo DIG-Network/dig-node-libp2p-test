@@ -18,6 +18,7 @@ export declare class DIGNode {
     private webSocketRelay;
     private e2eEncryption;
     private zkPrivacy;
+    private downloadManager;
     private peerProtocolVersions;
     private nodeCapabilities;
     private requestCounts;

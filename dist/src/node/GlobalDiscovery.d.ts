@@ -26,5 +26,6 @@ export declare class GlobalDiscovery {
     getStats(): any;
     addDiscoveryServer(serverUrl: string): void;
     discoverViaDHT(dhtService: any): Promise<string[]>;
+    private verifyRegistrationStatus;
     announceToGlobalDHT(dhtService: any): Promise<void>;
 }

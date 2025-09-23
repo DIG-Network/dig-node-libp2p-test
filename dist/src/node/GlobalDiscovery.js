@@ -34,6 +34,12 @@ export class GlobalDiscovery {
                 this.logger.warn('Peer discovery failed:', error);
             });
         }, 30 * 1000);
+        // Verify registration status periodically and re-register if needed
+        setInterval(() => {
+            this.verifyRegistrationStatus().catch(error => {
+                this.logger.warn('Registration verification failed:', error);
+            });
+        }, 5 * 60 * 1000); // Every 5 minutes
         // Initial peer discovery
         setTimeout(() => this.discoverPeers(), 5000);
     }
@@ -244,6 +250,44 @@ export class GlobalDiscovery {
             this.logger.warn('DHT-based discovery failed:', error);
         }
         return discoveredAddresses;
+    }
+    // Verify registration status and re-register if needed
+    async verifyRegistrationStatus() {
+        this.logger.info('🔍 Verifying registration status with bootstrap servers...');
+        for (const server of this.discoveryServers) {
+            try {
+                // Check if we're registered by looking for ourselves in the crypto-IPv6 directory
+                const response = await fetch(`${server}/crypto-ipv6-directory`, {
+                    signal: AbortSignal.timeout(10000)
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    const isRegistered = data.peers?.some((p) => p.peerId === this.peerId);
+                    if (isRegistered) {
+                        this.logger.info(`✅ Registration verified with ${server}`);
+                    }
+                    else {
+                        this.logger.warn(`❌ Not found in ${server} directory - re-registering...`);
+                        await this.registerWithDiscoveryServers();
+                    }
+                }
+                else {
+                    this.logger.warn(`⚠️ Failed to verify registration with ${server}: ${response.status}`);
+                    // Re-register on verification failure
+                    await this.registerWithDiscoveryServers();
+                }
+            }
+            catch (error) {
+                this.logger.warn(`Registration verification failed for ${server}:`, error);
+                // Re-register on error
+                try {
+                    await this.registerWithDiscoveryServers();
+                }
+                catch (regError) {
+                    this.logger.error('Re-registration failed:', regError);
+                }
+            }
+        }
     }
     // Announce this node to DHT for global discovery
     async announceToGlobalDHT(dhtService) {
