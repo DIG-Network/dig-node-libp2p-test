@@ -1255,8 +1255,9 @@ export class DIGNode {
         uint8ArrayFromString(JSON.stringify(capabilityAnnouncement))
       )
 
-      const turnStatus = this.nodeCapabilities.turnServer ? '📡 TURN-enabled' : '🔗 P2P-only'
-      this.logger.debug(`🗣️ Announced to privacy overlay: ${this.getAvailableStores().length} stores, ${turnStatus}`)
+        const turnStatus = this.nodeCapabilities.turnServer ? '📡 TURN-enabled' : '🔗 P2P-only'
+        this.logger.debug(`🗣️ Announced to privacy overlay: ${this.getAvailableStores().length} stores, ${turnStatus}`)
+      }) // Close obfuscateTiming function
 
     } catch (error) {
       this.logger.debug('Failed to announce to privacy overlay:', error)
@@ -1533,12 +1534,7 @@ export class DIGNode {
     return []
   }
 
-    } catch (error) {
-      this.logger.debug(`Failed to request peers from ${peerId}:`, error)
-    }
 
-    return []
-  }
 
   // Get TURN-capable peers from distributed privacy network
   getPrivacyTurnServers(): Array<{peerId: string, cryptoIPv6: string, capabilities: NodeCapabilities}> {
@@ -1743,7 +1739,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('Direct LibP2P download failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 2: DHT-based store discovery and download
@@ -1755,7 +1751,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('DHT store download failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 3: Gossip network store discovery
@@ -1767,7 +1763,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('Gossip store download failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 4: Distributed TURN servers (peer-to-peer)
@@ -1779,7 +1775,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('Distributed TURN download failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 5: Mesh routing through connected peers
@@ -1791,7 +1787,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('Mesh routing download failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 6: Bootstrap server TURN fallback
@@ -1803,7 +1799,7 @@ export class DIGNode {
         return true
       }
     } catch (error) {
-      this.logger.debug('Bootstrap TURN fallback failed:', error)
+      // Silent failure - will try next method
     }
 
     // Layer 7: Bootstrap server direct download (absolute last resort)
@@ -1939,7 +1935,7 @@ export class DIGNode {
           }
 
         } catch (error) {
-          this.logger.debug(`TURN server ${turnServer.peerId} failed:`, error)
+          // Silent failure - will try next TURN server
           continue
         }
       }
@@ -1974,7 +1970,7 @@ export class DIGNode {
           }
 
         } catch (error) {
-          this.logger.debug(`Mesh routing via ${peer.toString()} failed:`, error)
+          // Silent failure - will try next peer
         }
       }
 
@@ -3174,7 +3170,7 @@ export class DIGNode {
           const success = await this.downloadStoreInParallelFromPeers(storeId, availablePeers)
           if (success) return // Success with parallel download
         } catch (error) {
-          this.logger.warn(`Parallel LibP2P download failed:`, error)
+          // Silent failure - will try next method
         }
       }
       
@@ -3184,7 +3180,7 @@ export class DIGNode {
           await this.downloadStoreFromLibP2PPeer(storeId, peerId, peer);
           return; // Success, no need to try other methods
         } catch (error) {
-          this.logger.warn(`LibP2P download failed from peer ${peerId}:`, error);
+          // Silent failure - will try next peer
         }
       }
     }
@@ -3196,7 +3192,7 @@ export class DIGNode {
       console.log(`✅ Downloaded ${storeId} via TURN server network`);
       return;
     } catch (turnError) {
-      this.logger.warn(`TURN server download failed: ${turnError}`);
+      // Silent failure - will try bootstrap server
     }
 
     // 4. ABSOLUTE LAST RESORT: Use bootstrap server relay (only if no TURN servers available)
@@ -3619,7 +3615,7 @@ export class DIGNode {
         try {
           await this.connectToDiscoveredPeers()
         } catch (error) {
-          this.logger.debug('Periodic peer connection failed:', error)
+          // Silent failure - periodic connection will retry
         }
       }, 30000) // Every 30 seconds (more frequent)
 
@@ -3628,7 +3624,7 @@ export class DIGNode {
         try {
           await this.connectToDiscoveredPeers()
         } catch (error) {
-          this.logger.debug('Initial peer connection failed:', error)
+          // Silent failure - initial connection will be retried
         }
       }, 10000) // After 10 seconds
       
@@ -3874,13 +3870,13 @@ export class DIGNode {
                 try {
                   await this.initiateProtocolHandshake(peerIdFromAddr)
                 } catch (handshakeError) {
-                  this.logger.warn(`Handshake failed with ${peerIdFromAddr}:`, handshakeError)
+                  // Silent handshake failure - connection still established
                 }
               }
               break // Exit resolved addresses loop
             }
           } catch (connectionError) {
-            this.logger.debug(`Connection failed to ${resolvedAddr}: ${connectionError}`)
+            // Silent failure - will try next address
           }
         }
         
@@ -3901,7 +3897,7 @@ export class DIGNode {
             )
           ])
         } catch (directError) {
-          this.logger.warn(`Direct connection failed: ${directError instanceof Error ? directError.message : directError}`)
+          // Silent failure - will try circuit relay
           
           // 1. Try circuit relay connection first (REAL LibP2P connection)
           try {
@@ -3918,7 +3914,7 @@ export class DIGNode {
               this.logger.info(`🌐 Successfully connected via circuit relay`);
             }
           } catch (relayError) {
-            this.logger.warn(`Circuit relay connection failed: ${relayError instanceof Error ? relayError.message : relayError}`);
+            // Silent failure - will try WebSocket relay
             
             // 2. Only try WebSocket relay as LAST RESORT
             if (false) { // Disabled - using crypto-IPv6 logic above
@@ -3945,7 +3941,7 @@ export class DIGNode {
         this.logger.info(`🔗 Connection established, remote peer: ${peerIdFromConn}`)
         
       } catch (error) {
-        this.logger.warn(`❌ Failed to process address [${isCryptoIPv6Address(address) ? 'crypto-IPv6' : 'direct'}]:`, error instanceof Error ? error.message : error)
+        // Silent failure - only log final result
       }
     }
     

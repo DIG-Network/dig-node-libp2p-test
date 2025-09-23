@@ -89,6 +89,8 @@ export interface DIGRequest {
     includeStores?: boolean;
     includeCapabilities?: boolean;
     privacyMode?: boolean;
+    metadata?: any;
+    anonymousQueries?: any[];
 }
 export interface DIGResponse {
     success: boolean;

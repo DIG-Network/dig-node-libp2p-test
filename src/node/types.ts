@@ -109,6 +109,9 @@ export interface DIGRequest {
   includeStores?: boolean;
   includeCapabilities?: boolean;
   privacyMode?: boolean;
+  // Zero-knowledge privacy fields
+  metadata?: any;
+  anonymousQueries?: any[];
 }
 
 export interface DIGResponse {

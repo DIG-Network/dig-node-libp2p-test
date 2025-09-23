@@ -23,21 +23,21 @@ export class MandatoryPrivacyPolicy {
       name: 'Noise Protocol Encryption',
       mandatory: true,
       description: 'Mandatory encrypted connections with perfect forward secrecy',
-      fallback: null // No fallback - absolutely required
+      fallback: undefined // No fallback - absolutely required
     })
 
     this.privacyFeatures.set('crypto-ipv6', {
       name: 'Crypto-IPv6 Addressing',
       mandatory: true,
       description: 'Hide real IP addresses using cryptographic IPv6',
-      fallback: null // No fallback - absolutely required
+      fallback: undefined // No fallback - absolutely required
     })
 
     this.privacyFeatures.set('e2e-encryption', {
       name: 'End-to-End Encryption',
       mandatory: true,
       description: 'AES-256-CBC encryption for all data transfers',
-      fallback: null // No fallback - absolutely required
+      fallback: undefined // No fallback - absolutely required
     })
 
     this.privacyFeatures.set('zero-knowledge-proofs', {
@@ -297,7 +297,7 @@ interface PrivacyFeature {
   name: string
   mandatory: boolean
   description: string
-  fallback: string | null
+  fallback: string | undefined
 }
 
 // Privacy feature test result
