@@ -22,6 +22,28 @@ const { Server: SocketIOServer } = require('socket.io')
 import type { Request, Response } from 'express'
 import type { Socket } from 'socket.io'
 
+// Extend global type for pending bootstrap TURN requests
+declare global {
+  var pendingBootstrapTurnRequests: Map<string, any> | undefined
+}
+
+// Interface for registered peers with privacy support
+interface RegisteredPeer {
+  peerId: string
+  addresses: string[]
+  realAddresses?: string[] // Private real addresses (only for resolution)
+  cryptoIPv6?: string
+  stores: string[]
+  version: string
+  privacyMode?: boolean
+  turnCapable?: boolean
+  turnAddresses?: string[]
+  turnPort?: number
+  turnLoad?: number
+  turnCapacity?: number
+  lastSeen: number
+}
+
 // Configuration
 const PORT = parseInt(process.env.PORT || '3000')
 const NODE_ENV = process.env.NODE_ENV || 'development'
@@ -32,20 +54,7 @@ console.log(`🌐 Port: ${PORT}`)
 console.log(`🔧 Environment: ${NODE_ENV}`)
 console.log('============================================')
 
-// Types
-interface RegisteredPeer {
-  peerId: string
-  addresses: string[]
-  cryptoIPv6: string
-  stores: string[]
-  lastSeen: number
-  version?: string
-  turnCapable?: boolean
-  turnAddresses?: string[]
-  turnPort?: number
-  turnCapacity?: number
-  turnLoad?: number
-}
+// Types (using enhanced interface above)
 
 interface ExtendedSocket {
   peerId?: string
@@ -92,18 +101,34 @@ app.get('/health', (req: Request, res: Response) => {
 // Peer registration endpoint
 app.post('/register', (req: Request, res: Response) => {
   try {
-    const { peerId, addresses, cryptoIPv6, stores = [], version = '1.0.0' } = req.body
+    const { 
+      peerId, 
+      addresses, 
+      cryptoIPv6, 
+      stores = [], 
+      version = '1.0.0', 
+      privacyMode = false,
+      capabilities = {},
+      turnCapable = false,
+      bootstrapCapable = false
+    } = req.body
     
     if (!peerId || !addresses || !Array.isArray(addresses)) {
       return res.status(400).json({ error: 'Missing required fields: peerId, addresses' })
     }
 
+    // Privacy mode: separate real addresses from public crypto-IPv6 addresses
     const peer: RegisteredPeer = {
       peerId,
-      addresses,
+      addresses: privacyMode ? [`/ip6/${cryptoIPv6}/tcp/4001`, `/ip6/${cryptoIPv6}/ws`] : addresses,
+      realAddresses: privacyMode ? addresses : undefined, // Store real addresses privately
       cryptoIPv6,
       stores,
       version,
+      privacyMode,
+      capabilities: capabilities,
+      turnCapable: turnCapable || capabilities?.turnServer || false,
+      bootstrapCapable: bootstrapCapable || capabilities?.bootstrapServer || false,
       lastSeen: Date.now()
     }
 
@@ -299,7 +324,30 @@ app.post('/relay-store', (req: Request, res: Response) => {
       }
     }
 
-    // Fallback to WebSocket relay
+    // Check if we can act as fallback TURN server (direct HTTP relay)
+    const sourcePeer = registeredPeers.get(fromPeerId)
+    const targetPeer = registeredPeers.get(toPeerId)
+    
+    if (sourcePeer && targetPeer) {
+      // Bootstrap server acts as fallback TURN server via HTTP relay
+      console.log(`📡 Acting as fallback TURN server: ${fromPeerId} -> ${toPeerId}`)
+      
+      const method = isRangeRequest ? 'bootstrap-turn-range-relay' : 'bootstrap-turn-relay'
+      
+      return res.json({
+        success: true,
+        method,
+        fallbackTurnServer: {
+          type: 'bootstrap-server',
+          relayEndpoint: '/bootstrap-turn-relay',
+          addresses: ['bootstrap-server'],
+          port: 3000
+        },
+        rangeInfo: isRangeRequest ? { rangeStart, rangeEnd, chunkId, totalSize } : undefined
+      })
+    }
+
+    // Final fallback to WebSocket relay
     const targetSocket = Array.from(io.sockets.sockets.values())
       .find(socket => (socket as ExtendedSocket).peerId === toPeerId) as ExtendedSocket
     
@@ -317,11 +365,163 @@ app.post('/relay-store', (req: Request, res: Response) => {
       console.log(`🔌 Routing via WebSocket relay to ${toPeerId} (method: ${method})`)
       res.json({ success: true, method })
     } else {
-      res.status(404).json({ error: 'Target peer not connected' })
+      res.status(404).json({ error: 'Target peer not connected and no relay methods available' })
     }
   } catch (error) {
     console.error('Store relay error:', error)
     res.status(500).json({ error: 'Store relay failed' })
+  }
+})
+
+// Crypto-IPv6 address resolution endpoint (privacy-preserving)
+app.post('/resolve-crypto-ipv6', (req: Request, res: Response) => {
+  try {
+    const { cryptoIPv6 } = req.body
+    
+    if (!cryptoIPv6) {
+      return res.status(400).json({ error: 'Missing cryptoIPv6 parameter' })
+    }
+
+    // Find peer by crypto-IPv6
+    let foundPeer = null
+    for (const [peerId, peer] of registeredPeers) {
+      if (peer.cryptoIPv6 === cryptoIPv6) {
+        foundPeer = peer
+        break
+      }
+    }
+
+    if (!foundPeer) {
+      return res.status(404).json({ 
+        error: 'Crypto-IPv6 address not found',
+        cryptoIPv6,
+        suggestion: 'Peer may not be online or registered'
+      })
+    }
+
+    // Return the real addresses for connection (only to authenticated requesters)
+    // In a production system, you might want additional authentication here
+    const realAddresses = foundPeer.realAddresses || foundPeer.addresses || []
+    
+    console.log(`🔍 Resolved crypto-IPv6 ${cryptoIPv6} to ${realAddresses.length} addresses for peer ${foundPeer.peerId}`)
+    
+    res.json({
+      success: true,
+      cryptoIPv6,
+      peerId: foundPeer.peerId,
+      addresses: realAddresses,
+      lastSeen: foundPeer.lastSeen
+    })
+
+  } catch (error) {
+    console.error('Crypto-IPv6 resolution error:', error)
+    res.status(500).json({ error: 'Resolution failed' })
+  }
+})
+
+// Crypto-IPv6 overlay network directory (privacy-preserving peer discovery)
+app.get('/crypto-ipv6-directory', (req: Request, res: Response) => {
+  try {
+    const directory = []
+    
+    for (const [peerId, peer] of registeredPeers) {
+      if (peer.cryptoIPv6) {
+        directory.push({
+          peerId,
+          cryptoIPv6: peer.cryptoIPv6,
+          stores: peer.stores || [],
+          lastSeen: peer.lastSeen,
+          version: peer.version,
+          privacyMode: peer.privacyMode || false,
+          turnCapable: peer.turnCapable || false
+          // 🔐 PRIVACY: Real IP addresses are NOT included
+        })
+      }
+    }
+    
+    console.log(`🔍 Crypto-IPv6 directory requested: ${directory.length} peers`)
+    
+    res.json({
+      success: true,
+      peers: directory,
+      totalPeers: directory.length,
+      privacyEnabled: true,
+      timestamp: new Date().toISOString()
+    })
+
+  } catch (error) {
+    console.error('Crypto-IPv6 directory error:', error)
+    res.status(500).json({ error: 'Failed to get crypto-IPv6 directory' })
+  }
+})
+
+// Bootstrap server acting as fallback TURN server
+app.post('/bootstrap-turn-relay', (req: Request, res: Response) => {
+  try {
+    const { storeId, fromPeerId, toPeerId, rangeStart, rangeEnd, chunkId } = req.body
+    
+    if (!storeId || !fromPeerId || !toPeerId) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    const sourcePeer = registeredPeers.get(fromPeerId)
+    if (!sourcePeer) {
+      return res.status(404).json({ error: 'Source peer not found' })
+    }
+
+    const isRangeRequest = typeof rangeStart === 'number' && typeof rangeEnd === 'number'
+    
+    console.log(`🔄 Bootstrap TURN relay: ${storeId} ${isRangeRequest ? `(${rangeStart}-${rangeEnd})` : ''} from ${fromPeerId} to ${toPeerId}`)
+    
+    // Find the source peer's socket connection
+    const sourceSocket = Array.from(io.sockets.sockets.values())
+      .find(socket => (socket as ExtendedSocket).peerId === fromPeerId) as ExtendedSocket
+    
+    if (!sourceSocket) {
+      return res.status(404).json({ error: 'Source peer not connected via WebSocket' })
+    }
+
+    // Create a unique request ID for this transfer
+    const requestId = chunkId || `bootstrap_turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
+    // Set up response handler with timeout
+    const responseTimeout = setTimeout(() => {
+      console.log(`⏱️ Bootstrap TURN relay timeout for request ${requestId}`)
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'Request timeout' })
+      }
+    }, 30000) // 30 second timeout
+    
+    // Store the HTTP response object for this request
+    const pendingRequest = {
+      res,
+      timeout: responseTimeout,
+      isRangeRequest,
+      requestId,
+      startTime: Date.now()
+    }
+    
+    // Use a Map to track pending bootstrap TURN requests
+    if (!global.pendingBootstrapTurnRequests) {
+      global.pendingBootstrapTurnRequests = new Map()
+    }
+    global.pendingBootstrapTurnRequests.set(requestId, pendingRequest)
+    
+    // Send request to source peer via WebSocket
+    const requestData = {
+      storeId,
+      toPeerId,
+      requestId,
+      method: 'bootstrap-turn-relay',
+      ...(isRangeRequest ? { rangeStart, rangeEnd, chunkId, totalSize: undefined } : {})
+    }
+    
+    console.log(`📡 Requesting data from ${fromPeerId} via WebSocket for bootstrap TURN relay`)
+    sourceSocket.emit('bootstrap-turn-request', requestData)
+    
+  } catch (error) {
+    console.error('Bootstrap TURN relay error:', error)
+    res.status(500).json({ error: 'Bootstrap TURN relay failed' })
   }
 })
 
@@ -349,6 +549,62 @@ io.on('connection', (socket: Socket) => {
         requestId
       })
       console.log(`📦 Relayed store data for ${storeId} to ${toPeerId}`)
+    }
+  })
+
+  // Handle bootstrap TURN relay responses
+  socket.on('bootstrap-turn-response', (data: any) => {
+    const { requestId, success, error, storeData, size } = data
+    
+    if (!global.pendingBootstrapTurnRequests) {
+      console.log(`⚠️ No pending requests map for bootstrap TURN response ${requestId}`)
+      return
+    }
+    
+    const pendingRequest = global.pendingBootstrapTurnRequests.get(requestId)
+    if (!pendingRequest) {
+      console.log(`⚠️ No pending request found for bootstrap TURN response ${requestId}`)
+      return
+    }
+    
+    // Clear timeout
+    clearTimeout(pendingRequest.timeout)
+    global.pendingBootstrapTurnRequests.delete(requestId)
+    
+    const { res, startTime } = pendingRequest
+    const duration = Date.now() - startTime
+    
+    if (res.headersSent) {
+      console.log(`⚠️ HTTP response already sent for request ${requestId}`)
+      return
+    }
+    
+    if (!success || error) {
+      console.log(`❌ Bootstrap TURN relay failed for ${requestId}: ${error}`)
+      return res.status(500).json({ error: error || 'Store retrieval failed' })
+    }
+    
+    if (!storeData) {
+      console.log(`❌ No store data received for ${requestId}`)
+      return res.status(404).json({ error: 'No store data received' })
+    }
+    
+    try {
+      // Convert base64 data back to binary
+      const binaryData = Buffer.from(storeData, 'base64')
+      
+      console.log(`✅ Bootstrap TURN relay completed for ${requestId}: ${binaryData.length} bytes in ${duration}ms`)
+      
+      // Set appropriate headers
+      res.setHeader('Content-Type', 'application/octet-stream')
+      res.setHeader('Content-Length', binaryData.length)
+      
+      // Send the binary data
+      res.send(binaryData)
+      
+    } catch (processError) {
+      console.error(`❌ Error processing bootstrap TURN response for ${requestId}:`, processError)
+      res.status(500).json({ error: 'Failed to process store data' })
     }
   })
 

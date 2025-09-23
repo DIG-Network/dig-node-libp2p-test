@@ -19,6 +19,47 @@ export function generateCryptoIPv6(publicKey: string): string {
 }
 
 /**
+ * Create crypto-IPv6 overlay network addresses (privacy-preserving)
+ */
+export function createCryptoIPv6Addresses(cryptoIPv6: string, port: number = 4001): string[] {
+  return [
+    `/ip6/${cryptoIPv6}/tcp/${port}`,
+    `/ip6/${cryptoIPv6}/ws`,
+    `/ip6/${cryptoIPv6}/wss`
+  ]
+}
+
+/**
+ * Resolve crypto-IPv6 to real addresses via bootstrap server (privacy-preserving lookup)
+ */
+export async function resolveCryptoIPv6(cryptoIPv6: string, bootstrapUrl: string): Promise<string[]> {
+  try {
+    const response = await fetch(`${bootstrapUrl}/resolve-crypto-ipv6`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cryptoIPv6 }),
+      signal: AbortSignal.timeout(5000)
+    })
+    
+    if (response.ok) {
+      const data = await response.json()
+      return data.addresses || []
+    }
+  } catch (error) {
+    console.warn(`Failed to resolve crypto-IPv6 ${cryptoIPv6}:`, error)
+  }
+  
+  return []
+}
+
+/**
+ * Check if an address is a crypto-IPv6 overlay address
+ */
+export function isCryptoIPv6Address(address: string): boolean {
+  return address.includes('/ip6/fd00:') && address.includes(':')
+}
+
+/**
  * Parse DIP-0001 URN: urn:dig:chia:{storeID}:{optional roothash}/{optional resource key}
  */
 export function parseURN(urn: string): ParsedURN | null {

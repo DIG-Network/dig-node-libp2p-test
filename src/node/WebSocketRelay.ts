@@ -107,6 +107,16 @@ export class WebSocketRelay {
         }
       });
 
+      this.socket.on('bootstrap-turn-request', (data) => {
+        const { requestId, storeId, toPeerId, method, rangeStart, rangeEnd } = data;
+        this.logger.info(`📡 Bootstrap TURN request received: ${storeId} for ${toPeerId} (method: ${method})`);
+        
+        const handler = this.messageHandlers.get('bootstrap-turn-request');
+        if (handler) {
+          handler({ requestId, storeId, toPeerId, method, rangeStart, rangeEnd });
+        }
+      });
+
       this.socket.on('disconnect', () => {
         this.logger.warn('📡 Disconnected from relay server');
       });
@@ -200,6 +210,24 @@ export class WebSocketRelay {
         this.logger.debug(`📤 Sent store error response: ${error}`);
       }
     }
+  }
+
+  // Send bootstrap TURN response with data
+  sendBootstrapTurnResponse(requestId: string, success: boolean, storeData?: string, error?: string, size?: number): void {
+    if (!this.socket?.connected) {
+      this.logger.error('Cannot send bootstrap TURN response: not connected');
+      return;
+    }
+
+    this.socket.emit('bootstrap-turn-response', {
+      requestId,
+      success,
+      storeData,
+      error,
+      size
+    });
+
+    this.logger.debug(`📡 Bootstrap TURN response sent for request ${requestId}: ${success ? 'success' : 'failed'}`);
   }
 
   // Get relay server URL

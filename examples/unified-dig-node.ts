@@ -8,6 +8,7 @@ async function main() {
   console.log('📡 TURN Server');
   console.log('🔐 End-to-End Encryption');
   console.log('📁 File Sharing & Sync');
+  console.log('🛡️ Crypto-IPv6 Privacy Network');
   console.log('');
 
   // Configuration for unified node
@@ -27,6 +28,10 @@ async function main() {
     enableGlobalDiscovery: true,
     enableTurnServer: true,
     turnPort: parseInt(process.env.TURN_PORT || '3478'),
+    
+    // 🔐 PRIVACY MODE: Only expose crypto-IPv6 addresses, hide real IPs
+    privacyMode: process.env.DIG_PRIVACY_MODE === 'true',
+    enableCryptoIPv6Overlay: process.env.DIG_CRYPTO_IPV6_OVERLAY === 'true',
     
     // Optional manual connections
     connectToPeers: process.env.DIG_CONNECT_PEERS ? 

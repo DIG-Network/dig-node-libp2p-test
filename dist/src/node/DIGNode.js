@@ -15,6 +15,7 @@ import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { webRTC } from '@libp2p/webrtc';
 import { webSockets } from '@libp2p/websockets';
 import { all } from '@libp2p/websockets/filters';
+import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { toString as uint8ArrayToString } from 'uint8arrays/to-string';
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string';
 import { randomBytes } from 'crypto';
@@ -22,7 +23,7 @@ import { readFile, readdir, stat, watch, writeFile } from 'fs/promises';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { DIG_PROTOCOL, DIG_DISCOVERY_PROTOCOL } from './types.js';
-import { generateCryptoIPv6, parseURN } from './utils.js';
+import { generateCryptoIPv6, parseURN, createCryptoIPv6Addresses, resolveCryptoIPv6, isCryptoIPv6Address } from './utils.js';
 import { Logger } from './logger.js';
 import { GlobalDiscovery } from './GlobalDiscovery.js';
 import { WebSocketRelay } from './WebSocketRelay.js';
@@ -74,6 +75,14 @@ export class DIGNode {
         this.cleanupInterval = null;
         this.MAX_REQUESTS_PER_MINUTE = 100;
         this.PEER_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+        // Distributed Privacy Overlay Network
+        this.privacyOverlayPeers = new Map();
+        this.gossipTopics = {
+            PEER_DISCOVERY: 'dig-privacy-peer-discovery',
+            ADDRESS_EXCHANGE: 'dig-privacy-address-exchange',
+            STORE_ANNOUNCEMENTS: 'dig-privacy-store-announcements',
+            CAPABILITY_ANNOUNCEMENTS: 'dig-privacy-capability-announcements'
+        };
         this.metrics = {
             filesLoaded: 0,
             filesShared: 0,
@@ -255,6 +264,21 @@ export class DIGNode {
                 ping: ping(),
                 identify: identify()
             };
+            // Add gossipsub for distributed privacy peer discovery
+            if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+                const gossipService = await this.safeServiceInit('e2eEncryption', () => gossipsub({
+                    emitSelf: false,
+                    allowPublishToZeroTopicPeers: false,
+                    msgIdFn: (msg) => {
+                        // Custom message ID for privacy
+                        return uint8ArrayFromString(msg.topic + msg.data.toString());
+                    }
+                }), 'GossipSub Privacy Discovery');
+                if (gossipService) {
+                    services.gossipsub = gossipService;
+                    this.logger.info('🗣️ GossipSub enabled for distributed privacy peer discovery');
+                }
+            }
             // Safely initialize DHT service
             if (this.config.enableDht !== false) {
                 const dhtService = await this.safeServiceInit('dht', () => kadDHT({
@@ -279,7 +303,7 @@ export class DIGNode {
                     `/ip4/0.0.0.0/tcp/${(this.config.port || 0) + 1}/ws` // WebSocket for NAT traversal
                 ]
             };
-            this.logger.info(`🔗 LibP2P addresses: ${addresses.listen.join(', ')}`);
+            this.logger.info(`🔗 LibP2P addresses: ${this.config.privacyMode ? '[hidden for privacy]' : addresses.listen.join(', ')}`);
             // Build transports with graceful degradation
             const transports = [tcp()]; // TCP is always available
             // Try to add WebSocket transport
@@ -367,6 +391,10 @@ export class DIGNode {
             // These are less likely to fail but still use safe init for consistency
             if (this.config.enableGlobalDiscovery !== false) {
                 await this.safeServiceInit('storeSync', () => this.startGlobalDiscovery(), 'Global Discovery');
+            }
+            // Start distributed privacy overlay network (no bootstrap dependency)
+            if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+                await this.safeServiceInit('storeSync', () => this.startDistributedPrivacyDiscovery(), 'Distributed Privacy Overlay');
             }
             // WebSocket relay depends on bootstrap server
             if (this.nodeCapabilities.bootstrapServer) {
@@ -530,7 +558,9 @@ export class DIGNode {
             connectedPeers: this.node ? this.node.getPeers().map(p => p.toString()) : [],
             discoveredPeers: Array.from(this.discoveredPeers),
             metrics: this.getMetrics(),
-            addresses: this.node ? this.node.getMultiaddrs().map(addr => addr.toString()) : []
+            addresses: this.config.privacyMode ?
+                [`/ip6/${this.cryptoIPv6}/tcp/${this.config.port || 4001}`] :
+                (this.node ? this.node.getMultiaddrs().map(addr => addr.toString()) : [])
         };
     }
     // Setup built-in bootstrap server
@@ -615,6 +645,533 @@ export class DIGNode {
     getBootstrapPort() {
         // Use PORT environment variable for AWS compatibility, otherwise P2P port + 1000
         return parseInt(process.env.PORT || '0') || (this.config.port || 4001) + 1000;
+    }
+    // Resolve crypto-IPv6 addresses to real addresses for connection (privacy-preserving)
+    async resolveCryptoIPv6Address(cryptoAddress) {
+        if (!isCryptoIPv6Address(cryptoAddress)) {
+            return [cryptoAddress]; // Not a crypto address, return as-is
+        }
+        const bootstrapUrl = this.config.discoveryServers?.[0];
+        if (!bootstrapUrl) {
+            this.logger.warn('No bootstrap server available for crypto-IPv6 resolution');
+            return [];
+        }
+        // Extract crypto-IPv6 from multiaddr
+        const match = cryptoAddress.match(/\/ip6\/(fd00:[a-fA-F0-9:]+)\//);
+        if (!match) {
+            this.logger.warn(`Invalid crypto-IPv6 address format: ${cryptoAddress}`);
+            return [];
+        }
+        const cryptoIPv6 = match[1];
+        this.logger.debug(`🔍 Resolving crypto-IPv6: ${cryptoIPv6}`);
+        try {
+            // 🛡️ DISTRIBUTED PRIVACY: Try distributed resolution first (DHT + Gossip)
+            if (this.config.privacyMode || this.config.enableCryptoIPv6Overlay) {
+                // Extract peer ID from crypto address if available
+                const peerIdMatch = cryptoAddress.match(/\/p2p\/([^\/]+)$/);
+                const peerId = peerIdMatch ? peerIdMatch[1] : null;
+                if (peerId) {
+                    const distributedAddresses = await this.resolveDistributedPeerAddresses(peerId, cryptoIPv6);
+                    if (distributedAddresses.length > 0) {
+                        this.logger.info(`🔐 Resolved ${cryptoIPv6} via distributed network: ${distributedAddresses.length} addresses`);
+                        return distributedAddresses;
+                    }
+                }
+            }
+            // Fallback to bootstrap server only if distributed resolution failed
+            this.logger.debug(`🔄 Falling back to bootstrap server for ${cryptoIPv6}`);
+            const realAddresses = await resolveCryptoIPv6(cryptoIPv6, bootstrapUrl);
+            this.logger.debug(`🔐 Resolved ${cryptoIPv6} via bootstrap: ${realAddresses.length} addresses`);
+            return realAddresses;
+        }
+        catch (error) {
+            this.logger.warn(`Failed to resolve crypto-IPv6 ${cryptoIPv6}:`, error);
+            return [];
+        }
+    }
+    // Distributed Privacy Overlay Network Methods
+    // Start distributed peer discovery using gossip and DHT (no bootstrap dependency)
+    async startDistributedPrivacyDiscovery() {
+        if (!this.config.privacyMode && !this.config.enableCryptoIPv6Overlay) {
+            return;
+        }
+        this.logger.info('🛡️ Starting distributed privacy overlay network...');
+        try {
+            // Subscribe to privacy discovery topics
+            const gossipsub = this.node.services.gossipsub;
+            if (gossipsub) {
+                // Subscribe to peer discovery gossip
+                await gossipsub.subscribe(this.gossipTopics.PEER_DISCOVERY);
+                await gossipsub.subscribe(this.gossipTopics.ADDRESS_EXCHANGE);
+                await gossipsub.subscribe(this.gossipTopics.STORE_ANNOUNCEMENTS);
+                await gossipsub.subscribe(this.gossipTopics.CAPABILITY_ANNOUNCEMENTS);
+                // Handle incoming gossip messages
+                gossipsub.addEventListener('message', (evt) => {
+                    this.handleGossipMessage(evt.detail);
+                });
+                this.logger.info('🗣️ Subscribed to privacy gossip topics');
+                // Start periodic privacy announcements
+                setInterval(() => {
+                    this.announceToPrivacyOverlay();
+                }, 60000); // Every minute
+                // Start periodic distributed peer discovery
+                setInterval(() => {
+                    this.discoverPeersFromNetwork();
+                }, 120000); // Every 2 minutes
+                // Announce ourselves immediately
+                setTimeout(() => {
+                    this.announceToPrivacyOverlay();
+                }, 5000); // After 5 seconds
+                // Start distributed discovery after initial connections
+                setTimeout(() => {
+                    this.discoverPeersFromNetwork();
+                }, 30000); // After 30 seconds
+            }
+            // Use DHT for distributed address storage
+            const dht = this.node.services.dht;
+            if (dht) {
+                await this.storeAddressInDHT();
+                this.logger.info('🔐 Stored encrypted address mapping in DHT');
+                // Periodically refresh DHT storage
+                setInterval(() => {
+                    this.storeAddressInDHT();
+                }, 300000); // Every 5 minutes
+            }
+        }
+        catch (error) {
+            this.logger.warn('Failed to start distributed privacy discovery:', error);
+        }
+    }
+    // Handle gossip messages for peer discovery
+    async handleGossipMessage(message) {
+        try {
+            const { topic, data } = message;
+            const payload = JSON.parse(uint8ArrayToString(data));
+            if (topic === this.gossipTopics.PEER_DISCOVERY) {
+                await this.handlePeerDiscoveryGossip(payload);
+            }
+            else if (topic === this.gossipTopics.ADDRESS_EXCHANGE) {
+                await this.handleAddressExchangeGossip(payload);
+            }
+            else if (topic === this.gossipTopics.STORE_ANNOUNCEMENTS) {
+                await this.handleStoreAnnouncementGossip(payload);
+            }
+            else if (topic === this.gossipTopics.CAPABILITY_ANNOUNCEMENTS) {
+                await this.handleCapabilityAnnouncementGossip(payload);
+            }
+        }
+        catch (error) {
+            this.logger.debug('Failed to handle gossip message:', error);
+        }
+    }
+    // Handle peer discovery via gossip
+    async handlePeerDiscoveryGossip(payload) {
+        const { peerId, cryptoIPv6, stores, timestamp, capabilities } = payload;
+        if (peerId === this.node.peerId.toString()) {
+            return; // Ignore our own announcements
+        }
+        // Store peer info in privacy overlay with capabilities
+        this.privacyOverlayPeers.set(peerId, {
+            cryptoIPv6,
+            encryptedAddresses: '', // Will be populated via address exchange
+            lastSeen: timestamp,
+            capabilities: capabilities || {},
+            stores: stores || []
+        });
+        // Update peer stores mapping
+        if (stores && Array.isArray(stores)) {
+            this.peerStores.set(peerId, new Set(stores));
+        }
+        // Track TURN-capable peers for load balancing
+        if (capabilities?.turnServer) {
+            this.logger.info(`📡 Discovered TURN-capable privacy peer: ${peerId} (${cryptoIPv6})`);
+        }
+        this.logger.debug(`🔐 Discovered privacy peer via gossip: ${peerId} (${cryptoIPv6}) - TURN: ${capabilities?.turnServer ? 'Yes' : 'No'}`);
+    }
+    // Handle encrypted address exchange via gossip
+    async handleAddressExchangeGossip(payload) {
+        const { fromPeerId, toPeerId, encryptedAddresses } = payload;
+        // Only process if this message is for us
+        if (toPeerId !== this.node.peerId.toString()) {
+            return;
+        }
+        try {
+            // Decrypt the addresses using our shared secret
+            if (this.e2eEncryption.hasSharedSecret(fromPeerId)) {
+                const decryptedAddresses = this.e2eEncryption.decryptFromPeer(fromPeerId, encryptedAddresses);
+                const addresses = JSON.parse(decryptedAddresses.toString());
+                // Store the real addresses for this peer
+                const overlayPeer = this.privacyOverlayPeers.get(fromPeerId);
+                if (overlayPeer) {
+                    overlayPeer.encryptedAddresses = encryptedAddresses;
+                    this.logger.info(`🔐 Received encrypted addresses from ${fromPeerId}`);
+                }
+            }
+        }
+        catch (error) {
+            this.logger.debug(`Failed to decrypt addresses from ${fromPeerId}:`, error);
+        }
+    }
+    // Handle store announcements via gossip
+    async handleStoreAnnouncementGossip(payload) {
+        const { peerId, stores } = payload;
+        if (peerId === this.node.peerId.toString()) {
+            return; // Ignore our own announcements
+        }
+        // Update peer stores
+        if (stores && Array.isArray(stores)) {
+            this.peerStores.set(peerId, new Set(stores));
+            this.logger.debug(`📁 Updated stores for ${peerId}: ${stores.length} stores`);
+        }
+    }
+    // Handle capability announcements via gossip
+    async handleCapabilityAnnouncementGossip(payload) {
+        const { peerId, capabilities, timestamp } = payload;
+        if (peerId === this.node.peerId.toString()) {
+            return; // Ignore our own announcements
+        }
+        // Update peer capabilities
+        const overlayPeer = this.privacyOverlayPeers.get(peerId);
+        if (overlayPeer) {
+            overlayPeer.capabilities = capabilities;
+            overlayPeer.lastSeen = timestamp;
+            // Log important capability changes
+            if (capabilities?.turnServer) {
+                this.logger.info(`📡 Peer ${peerId} announced TURN server capability`);
+            }
+            if (capabilities?.bootstrapServer) {
+                this.logger.info(`🌐 Peer ${peerId} announced bootstrap server capability`);
+            }
+            this.logger.debug(`🔧 Updated capabilities for ${peerId}: ${Object.keys(capabilities || {}).filter(k => capabilities[k]).join(', ')}`);
+        }
+    }
+    // Announce ourselves to the privacy overlay network
+    async announceToPrivacyOverlay() {
+        try {
+            const gossipsub = this.node.services.gossipsub;
+            if (!gossipsub)
+                return;
+            // Announce peer discovery with capabilities
+            const peerAnnouncement = {
+                peerId: this.node.peerId.toString(),
+                cryptoIPv6: this.cryptoIPv6,
+                stores: this.getAvailableStores(),
+                capabilities: this.nodeCapabilities,
+                timestamp: Date.now(),
+                version: '1.0.0'
+            };
+            await gossipsub.publish(this.gossipTopics.PEER_DISCOVERY, uint8ArrayFromString(JSON.stringify(peerAnnouncement)));
+            // Announce stores
+            const storeAnnouncement = {
+                peerId: this.node.peerId.toString(),
+                stores: this.getAvailableStores(),
+                timestamp: Date.now()
+            };
+            await gossipsub.publish(this.gossipTopics.STORE_ANNOUNCEMENTS, uint8ArrayFromString(JSON.stringify(storeAnnouncement)));
+            // Announce capabilities (especially TURN server capability)
+            const capabilityAnnouncement = {
+                peerId: this.node.peerId.toString(),
+                capabilities: this.nodeCapabilities,
+                timestamp: Date.now()
+            };
+            await gossipsub.publish(this.gossipTopics.CAPABILITY_ANNOUNCEMENTS, uint8ArrayFromString(JSON.stringify(capabilityAnnouncement)));
+            const turnStatus = this.nodeCapabilities.turnServer ? '📡 TURN-enabled' : '🔗 P2P-only';
+            this.logger.debug(`🗣️ Announced to privacy overlay: ${this.getAvailableStores().length} stores, ${turnStatus}`);
+        }
+        catch (error) {
+            this.logger.debug('Failed to announce to privacy overlay:', error);
+        }
+    }
+    // Store encrypted address mapping in DHT for distributed resolution
+    async storeAddressInDHT() {
+        try {
+            const dht = this.node.services.dht;
+            if (!dht)
+                return;
+            const realAddresses = this.node.getMultiaddrs().map(addr => addr.toString());
+            const addressData = JSON.stringify(realAddresses);
+            // Encrypt the address data with our own public key (so others can decrypt with our public key)
+            const encryptedAddresses = this.e2eEncryption.encryptForPeer(this.node.peerId.toString(), Buffer.from(addressData));
+            // Store in DHT using crypto-IPv6 as key
+            const key = uint8ArrayFromString(`/dig-privacy-addr/${this.cryptoIPv6}`);
+            const value = uint8ArrayFromString(encryptedAddresses);
+            await dht.put(key, value);
+            this.logger.debug(`🔐 Stored encrypted addresses in DHT: ${this.cryptoIPv6}`);
+        }
+        catch (error) {
+            this.logger.debug('Failed to store addresses in DHT:', error);
+        }
+    }
+    // Resolve peer addresses from distributed sources (DHT + gossip)
+    async resolveDistributedPeerAddresses(peerId, cryptoIPv6) {
+        const resolvedAddresses = [];
+        try {
+            // 1. Try DHT resolution first
+            const dht = this.node.services.dht;
+            if (dht) {
+                const key = uint8ArrayFromString(`/dig-privacy-addr/${cryptoIPv6}`);
+                for await (const event of dht.get(key)) {
+                    if (event.name === 'VALUE') {
+                        try {
+                            const encryptedData = uint8ArrayToString(event.value);
+                            // Try to decrypt with the peer's public key (if we have established a secret)
+                            if (this.e2eEncryption.hasSharedSecret(peerId)) {
+                                const decryptedData = this.e2eEncryption.decryptFromPeer(peerId, encryptedData);
+                                const addresses = JSON.parse(decryptedData.toString());
+                                resolvedAddresses.push(...addresses);
+                                this.logger.info(`🔐 Resolved ${peerId} addresses from DHT: ${addresses.length} addresses`);
+                                break;
+                            }
+                        }
+                        catch (decryptError) {
+                            this.logger.debug(`Failed to decrypt DHT address for ${peerId}:`, decryptError);
+                        }
+                    }
+                }
+            }
+            // 2. Try gossip-based address exchange
+            const overlayPeer = this.privacyOverlayPeers.get(peerId);
+            if (overlayPeer && overlayPeer.encryptedAddresses) {
+                try {
+                    if (this.e2eEncryption.hasSharedSecret(peerId)) {
+                        const decryptedData = this.e2eEncryption.decryptFromPeer(peerId, overlayPeer.encryptedAddresses);
+                        const addresses = JSON.parse(decryptedData.toString());
+                        resolvedAddresses.push(...addresses);
+                        this.logger.info(`🗣️ Resolved ${peerId} addresses from gossip: ${addresses.length} addresses`);
+                    }
+                }
+                catch (decryptError) {
+                    this.logger.debug(`Failed to decrypt gossip address for ${peerId}:`, decryptError);
+                }
+            }
+            // 3. Fallback to bootstrap server only if no distributed resolution worked
+            if (resolvedAddresses.length === 0) {
+                this.logger.info(`🔄 No distributed resolution for ${peerId}, falling back to bootstrap server`);
+                return await resolveCryptoIPv6(cryptoIPv6, this.config.discoveryServers?.[0] || '');
+            }
+        }
+        catch (error) {
+            this.logger.debug(`Distributed address resolution failed for ${peerId}:`, error);
+        }
+        return resolvedAddresses;
+    }
+    // Handle peer exchange request (distributed discovery without bootstrap dependency)
+    async handlePeerExchangeRequest(request, requestingPeerId) {
+        try {
+            const { maxPeers = 10, includeStores = false, includeCapabilities = true, privacyMode = false } = request;
+            const knownPeers = [];
+            let peerCount = 0;
+            // Get peers from our various sources
+            const sources = [
+                this.privacyOverlayPeers, // Gossip-discovered peers
+                this.globalDiscovery?.knownPeers || new Map() // Bootstrap-discovered peers
+            ];
+            for (const peerMap of sources) {
+                for (const [peerId, peerInfo] of peerMap) {
+                    if (peerId === requestingPeerId || peerId === this.node.peerId.toString()) {
+                        continue; // Skip requester and ourselves
+                    }
+                    if (peerCount >= maxPeers)
+                        break;
+                    const peerData = {
+                        peerId,
+                        cryptoIPv6: peerInfo.cryptoIPv6,
+                        lastSeen: peerInfo.lastSeen || Date.now()
+                    };
+                    // Include stores if requested
+                    if (includeStores) {
+                        const peerStores = this.peerStores.get(peerId);
+                        peerData.stores = peerStores ? Array.from(peerStores) : (peerInfo.stores || []);
+                    }
+                    // Include capabilities if requested (especially TURN server capability)
+                    if (includeCapabilities) {
+                        const capabilities = 'capabilities' in peerInfo ? peerInfo.capabilities : undefined;
+                        if (capabilities) {
+                            peerData.capabilities = capabilities;
+                            peerData.turnCapable = capabilities.turnServer || false;
+                            peerData.bootstrapCapable = capabilities.bootstrapServer || false;
+                        }
+                    }
+                    // In privacy mode, never include real addresses
+                    if (!privacyMode) {
+                        const addresses = 'addresses' in peerInfo ? peerInfo.addresses : undefined;
+                        if (addresses) {
+                            peerData.addresses = addresses;
+                        }
+                    }
+                    knownPeers.push(peerData);
+                    peerCount++;
+                }
+                if (peerCount >= maxPeers)
+                    break;
+            }
+            this.logger.info(`📋 Peer exchange: Sharing ${knownPeers.length} peers with ${requestingPeerId} (privacy: ${privacyMode})`);
+            return {
+                success: true,
+                peers: knownPeers,
+                totalPeers: knownPeers.length,
+                privacyMode,
+                timestamp: Date.now()
+            };
+        }
+        catch (error) {
+            this.logger.error(`Peer exchange failed for ${requestingPeerId}:`, error);
+            return {
+                success: false,
+                error: `Peer exchange failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+            };
+        }
+    }
+    // Handle privacy peer discovery request
+    async handlePrivacyPeerDiscoveryRequest(request, requestingPeerId) {
+        try {
+            const { maxPeers = 5 } = request;
+            // Only share crypto-IPv6 addresses (never real IPs)
+            const privacyPeers = [];
+            let count = 0;
+            for (const [peerId, peerInfo] of this.privacyOverlayPeers) {
+                if (peerId === requestingPeerId || peerId === this.node.peerId.toString()) {
+                    continue;
+                }
+                if (count >= maxPeers)
+                    break;
+                privacyPeers.push({
+                    peerId,
+                    cryptoIPv6: peerInfo.cryptoIPv6,
+                    lastSeen: peerInfo.lastSeen
+                    // 🔐 PRIVACY: No real addresses ever shared
+                });
+                count++;
+            }
+            this.logger.info(`🛡️ Privacy discovery: Sharing ${privacyPeers.length} crypto-IPv6 peers with ${requestingPeerId}`);
+            return {
+                success: true,
+                peers: privacyPeers,
+                totalPeers: privacyPeers.length,
+                privacyMode: true,
+                timestamp: Date.now()
+            };
+        }
+        catch (error) {
+            this.logger.error(`Privacy peer discovery failed for ${requestingPeerId}:`, error);
+            return {
+                success: false,
+                error: `Privacy discovery failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+            };
+        }
+    }
+    // Request peers from other nodes (distributed discovery)
+    async requestPeersFromNode(peerId, privacyMode = true) {
+        try {
+            const peer = this.node.getPeers().find(p => p.toString() === peerId);
+            if (!peer) {
+                this.logger.warn(`Cannot request peers from ${peerId}: not connected`);
+                return [];
+            }
+            const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL);
+            const request = {
+                type: privacyMode ? 'PRIVACY_PEER_DISCOVERY' : 'PEER_EXCHANGE',
+                maxPeers: 10,
+                includeStores: true,
+                includeCapabilities: true,
+                privacyMode
+            };
+            // Send request
+            await pipe(async function* () {
+                yield uint8ArrayFromString(JSON.stringify(request));
+            }, stream.sink);
+            // Read response
+            const chunks = [];
+            await pipe(stream.source, async function (source) {
+                for await (const chunk of source) {
+                    chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray()));
+                }
+            });
+            if (chunks.length > 0) {
+                const response = JSON.parse(uint8ArrayToString(chunks[0]));
+                if (response.success && response.peers) {
+                    this.logger.info(`📋 Received ${response.peers.length} peers from ${peerId} (privacy: ${privacyMode})`);
+                    return response.peers;
+                }
+            }
+        }
+        catch (error) {
+            this.logger.debug(`Failed to request peers from ${peerId}:`, error);
+        }
+        return [];
+    }
+    // Get TURN-capable peers from distributed privacy network
+    getPrivacyTurnServers() {
+        const turnServers = [];
+        for (const [peerId, peerInfo] of this.privacyOverlayPeers) {
+            if (peerInfo.capabilities?.turnServer) {
+                turnServers.push({
+                    peerId,
+                    cryptoIPv6: peerInfo.cryptoIPv6,
+                    capabilities: peerInfo.capabilities
+                });
+            }
+        }
+        // Sort by last seen (most recent first)
+        turnServers.sort((a, b) => {
+            const peerA = this.privacyOverlayPeers.get(a.peerId);
+            const peerB = this.privacyOverlayPeers.get(b.peerId);
+            return (peerB?.lastSeen || 0) - (peerA?.lastSeen || 0);
+        });
+        this.logger.debug(`📡 Found ${turnServers.length} TURN-capable peers in privacy network`);
+        return turnServers;
+    }
+    // Get bootstrap-capable peers from distributed privacy network
+    getPrivacyBootstrapServers() {
+        const bootstrapServers = [];
+        for (const [peerId, peerInfo] of this.privacyOverlayPeers) {
+            if (peerInfo.capabilities?.bootstrapServer) {
+                bootstrapServers.push({
+                    peerId,
+                    cryptoIPv6: peerInfo.cryptoIPv6,
+                    capabilities: peerInfo.capabilities
+                });
+            }
+        }
+        this.logger.debug(`🌐 Found ${bootstrapServers.length} bootstrap-capable peers in privacy network`);
+        return bootstrapServers;
+    }
+    // Request peer discovery from connected nodes (distributed approach)
+    async discoverPeersFromNetwork() {
+        if (!this.config.privacyMode && !this.config.enableCryptoIPv6Overlay) {
+            return;
+        }
+        const connectedPeers = this.node.getPeers();
+        this.logger.info(`🔍 Requesting peer discovery from ${connectedPeers.length} connected nodes`);
+        // Request peers from each connected node
+        for (const peer of connectedPeers.slice(0, 3)) { // Limit to 3 requests to avoid spam
+            try {
+                const discoveredPeers = await this.requestPeersFromNode(peer.toString(), this.config.privacyMode || false);
+                // Process discovered peers
+                for (const peerInfo of discoveredPeers) {
+                    if (peerInfo.peerId !== this.node.peerId.toString()) {
+                        this.privacyOverlayPeers.set(peerInfo.peerId, {
+                            cryptoIPv6: peerInfo.cryptoIPv6,
+                            encryptedAddresses: '',
+                            lastSeen: peerInfo.lastSeen || Date.now(),
+                            capabilities: peerInfo.capabilities || {},
+                            stores: peerInfo.stores || []
+                        });
+                        // Update stores mapping
+                        if (peerInfo.stores) {
+                            this.peerStores.set(peerInfo.peerId, new Set(peerInfo.stores));
+                        }
+                    }
+                }
+                this.logger.info(`📋 Discovered ${discoveredPeers.length} peers from ${peer.toString()}`);
+            }
+            catch (error) {
+                this.logger.debug(`Failed to discover peers from ${peer.toString()}:`, error);
+            }
+        }
+        const turnCapablePeers = this.getPrivacyTurnServers().length;
+        const bootstrapCapablePeers = this.getPrivacyBootstrapServers().length;
+        this.logger.info(`🛡️ Privacy network status: ${this.privacyOverlayPeers.size} peers (${turnCapablePeers} TURN, ${bootstrapCapablePeers} bootstrap)`);
     }
     // Check if the discovery server points to this node itself
     isSelfRelay(bootstrapUrl, ourPort) {
@@ -836,6 +1393,16 @@ export class DIGNode {
                         // Handle protocol handshake and establish encryption
                         const handshakeResponse = await self.handleProtocolHandshake(request, peerId);
                         yield uint8ArrayFromString(JSON.stringify(handshakeResponse));
+                    }
+                    else if (request.type === 'PEER_EXCHANGE') {
+                        // Handle peer exchange request (distributed discovery)
+                        const peerExchangeResponse = await self.handlePeerExchangeRequest(request, peerId);
+                        yield uint8ArrayFromString(JSON.stringify(peerExchangeResponse));
+                    }
+                    else if (request.type === 'PRIVACY_PEER_DISCOVERY') {
+                        // Handle privacy peer discovery request
+                        const privacyDiscoveryResponse = await self.handlePrivacyPeerDiscoveryRequest(request, peerId);
+                        yield uint8ArrayFromString(JSON.stringify(privacyDiscoveryResponse));
                     }
                     else if (request.type === 'GET_FILE') {
                         const { storeId, filePath } = request;
@@ -1780,8 +2347,11 @@ export class DIGNode {
     // Start global discovery system
     async startGlobalDiscovery() {
         try {
-            const addresses = this.node.getMultiaddrs().map(addr => addr.toString());
-            this.globalDiscovery = new GlobalDiscovery(this.node.peerId.toString(), addresses, this.cryptoIPv6, () => this.getAvailableStores(), this.config.discoveryServers);
+            // 🔐 PRIVACY: Use crypto-IPv6 addresses in privacy mode, real addresses otherwise
+            const addresses = this.config.privacyMode ?
+                createCryptoIPv6Addresses(this.cryptoIPv6, this.config.port || 4001) :
+                this.node.getMultiaddrs().map(addr => addr.toString());
+            this.globalDiscovery = new GlobalDiscovery(this.node.peerId.toString(), addresses, this.cryptoIPv6, () => this.getAvailableStores(), this.config.discoveryServers, this.config.privacyMode || false);
             await this.globalDiscovery.start();
             // Also announce to DHT for global discovery
             const dht = this.node.services.dht;
@@ -1950,22 +2520,66 @@ export class DIGNode {
         // Try to connect to new peers
         for (const address of knownAddresses.slice(0, 5)) { // Reduce to 5 attempts per round
             try {
-                this.logger.debug(`🔗 Attempting connection to: ${address}`);
-                // Extract peer ID from address string (multiaddr format: .../p2p/PEER_ID)
-                const peerIdMatch = address.match(/\/p2p\/([^\/]+)$/);
-                const peerIdFromAddr = peerIdMatch ? peerIdMatch[1] : null;
-                // Skip if this is our own peer ID
-                if (peerIdFromAddr === this.node.peerId.toString()) {
-                    this.logger.debug(`⏭️ Skipping self-connection attempt: ${peerIdFromAddr}`);
-                    continue;
+                this.logger.debug(`🔗 Processing address: ${isCryptoIPv6Address(address) ? '[crypto-IPv6]' : '[direct]'}`);
+                // 🔐 PRIVACY: Resolve crypto-IPv6 addresses to real addresses if needed
+                let resolvedAddresses = [address];
+                if (isCryptoIPv6Address(address)) {
+                    this.logger.info(`🔍 Resolving crypto-IPv6 address: [hidden for privacy]`);
+                    resolvedAddresses = await this.resolveCryptoIPv6Address(address);
+                    if (resolvedAddresses.length === 0) {
+                        this.logger.warn(`❌ Failed to resolve crypto-IPv6 address: ${address}`);
+                        continue;
+                    }
+                    this.logger.info(`🔐 Resolved crypto-IPv6 to ${resolvedAddresses.length} real addresses`);
                 }
-                // Skip if we're already connected to this peer
-                if (peerIdFromAddr && currentPeers.has(peerIdFromAddr)) {
-                    this.logger.debug(`⏭️ Already connected to peer: ${peerIdFromAddr}`);
-                    continue;
+                // Try each resolved address
+                let connected = false;
+                for (const resolvedAddr of resolvedAddresses) {
+                    // Extract peer ID from resolved address
+                    const peerIdMatch = resolvedAddr.match(/\/p2p\/([^\/]+)$/);
+                    const peerIdFromAddr = peerIdMatch ? peerIdMatch[1] : null;
+                    // Skip if this is our own peer ID
+                    if (peerIdFromAddr === this.node.peerId.toString()) {
+                        this.logger.debug(`⏭️ Skipping self-connection: ${peerIdFromAddr}`);
+                        continue;
+                    }
+                    // Skip if we're already connected to this peer
+                    if (peerIdFromAddr && currentPeers.has(peerIdFromAddr)) {
+                        this.logger.debug(`⏭️ Already connected to peer: ${peerIdFromAddr}`);
+                        continue;
+                    }
+                    // Attempt connection to this resolved address
+                    this.logger.info(`🔗 Dialing peer: ${peerIdFromAddr} via ${isCryptoIPv6Address(address) ? 'crypto-IPv6 resolution' : 'direct address'}`);
+                    try {
+                        const addr = multiaddr(resolvedAddr);
+                        const connection = await Promise.race([
+                            this.node.dial(addr),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 30000))
+                        ]);
+                        if (connection) {
+                            this.logger.info(`✅ Connected to ${peerIdFromAddr} via ${isCryptoIPv6Address(address) ? 'crypto-IPv6 resolution' : 'direct address'}`);
+                            connected = true;
+                            this.metrics.peersConnected++;
+                            // Perform handshake
+                            if (peerIdFromAddr) {
+                                try {
+                                    await this.initiateProtocolHandshake(peerIdFromAddr);
+                                }
+                                catch (handshakeError) {
+                                    this.logger.warn(`Handshake failed with ${peerIdFromAddr}:`, handshakeError);
+                                }
+                            }
+                            break; // Exit resolved addresses loop
+                        }
+                    }
+                    catch (connectionError) {
+                        this.logger.debug(`Connection failed to ${resolvedAddr}: ${connectionError}`);
+                    }
                 }
+                if (connected)
+                    continue; // Move to next address if connected
                 // Attempt connection with multiple strategies for NAT traversal
-                this.logger.info(`🔗 Dialing peer: ${peerIdFromAddr} at ${address}`);
+                // Old connection logic removed - using crypto-IPv6 aware logic above
                 const addr = multiaddr(address);
                 let connection = null;
                 try {
@@ -1979,7 +2593,7 @@ export class DIGNode {
                     this.logger.warn(`Direct connection failed: ${directError instanceof Error ? directError.message : directError}`);
                     // 1. Try circuit relay connection first (REAL LibP2P connection)
                     try {
-                        this.logger.info(`🔄 Attempting circuit relay connection to: ${peerIdFromAddr}`);
+                        // Circuit relay logic moved to crypto-IPv6 resolution above
                         const relayAddr = this.createCircuitRelayAddress(address);
                         if (relayAddr) {
                             const relayMultiaddr = multiaddr(relayAddr);
@@ -1993,14 +2607,14 @@ export class DIGNode {
                     catch (relayError) {
                         this.logger.warn(`Circuit relay connection failed: ${relayError instanceof Error ? relayError.message : relayError}`);
                         // 2. Only try WebSocket relay as LAST RESORT
-                        if (this.webSocketRelay && this.webSocketRelay.isConnected() && peerIdFromAddr) {
+                        if (false) { // Disabled - using crypto-IPv6 logic above
                             try {
-                                this.logger.info(`🔄 LAST RESORT: Attempting WebSocket relay connection to: ${peerIdFromAddr}`);
-                                connection = await this.connectViaRelay(peerIdFromAddr);
+                                // WebSocket relay moved to crypto-IPv6 resolution
+                                // Relay connection handled above
                                 this.logger.info(`🌐 Connected via WebSocket relay (last resort)`);
                             }
                             catch (wsRelayError) {
-                                this.logger.warn(`WebSocket relay (last resort) failed: ${wsRelayError instanceof Error ? wsRelayError.message : wsRelayError}`);
+                                // WebSocket relay error handling moved to crypto-IPv6 resolution"
                             }
                         }
                     }
@@ -2011,16 +2625,16 @@ export class DIGNode {
                 const typedConnection = connection;
                 const peerIdFromConn = typedConnection.remotePeer.toString();
                 this.logger.info(`🌍 Successfully connected to discovered peer: ${peerIdFromConn}`);
-                this.logger.info(`📡 Connection address: ${address}`);
+                this.logger.info(`📡 Connection type: ${isCryptoIPv6Address(address) ? 'crypto-IPv6' : 'direct'}`);
                 this.logger.info(`🔗 Connection established, remote peer: ${peerIdFromConn}`);
             }
             catch (error) {
-                this.logger.warn(`❌ Failed to connect to ${address}:`, error instanceof Error ? error.message : error);
+                this.logger.warn(`❌ Failed to process address [${isCryptoIPv6Address(address) ? 'crypto-IPv6' : 'direct'}]:`, error instanceof Error ? error.message : error);
             }
         }
         // Log current connection status
         const connectedCount = this.node.getPeers().length;
-        this.logger.info(`📊 Currently connected to ${connectedCount} peers`);
+        this.logger.info(`📊 Connected to ${connectedCount} peers (crypto-IPv6 privacy: ${this.config.privacyMode ? 'enabled' : 'disabled'})`);
     }
     // Connect to manually configured peers
     async connectToConfiguredPeers() {

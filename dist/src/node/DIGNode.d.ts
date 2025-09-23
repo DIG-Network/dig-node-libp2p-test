@@ -29,6 +29,8 @@ export declare class DIGNode {
     private cleanupInterval;
     private readonly MAX_REQUESTS_PER_MINUTE;
     private readonly PEER_TIMEOUT;
+    private privacyOverlayPeers;
+    private gossipTopics;
     private metrics;
     constructor(config?: DIGNodeConfig);
     private ensureDigDirectory;
@@ -49,6 +51,30 @@ export declare class DIGNode {
     private setupBuiltInBootstrapServer;
     private startBuiltInBootstrapServer;
     private getBootstrapPort;
+    private resolveCryptoIPv6Address;
+    private startDistributedPrivacyDiscovery;
+    private handleGossipMessage;
+    private handlePeerDiscoveryGossip;
+    private handleAddressExchangeGossip;
+    private handleStoreAnnouncementGossip;
+    private handleCapabilityAnnouncementGossip;
+    private announceToPrivacyOverlay;
+    private storeAddressInDHT;
+    private resolveDistributedPeerAddresses;
+    private handlePeerExchangeRequest;
+    private handlePrivacyPeerDiscoveryRequest;
+    requestPeersFromNode(peerId: string, privacyMode?: boolean): Promise<any[]>;
+    getPrivacyTurnServers(): Array<{
+        peerId: string;
+        cryptoIPv6: string;
+        capabilities: NodeCapabilities;
+    }>;
+    getPrivacyBootstrapServers(): Array<{
+        peerId: string;
+        cryptoIPv6: string;
+        capabilities: NodeCapabilities;
+    }>;
+    discoverPeersFromNetwork(): Promise<void>;
     private isSelfRelay;
     private handleProtocolHandshake;
     private checkTurnCapability;

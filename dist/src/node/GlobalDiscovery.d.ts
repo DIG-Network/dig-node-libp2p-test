@@ -1,14 +1,23 @@
+export interface PeerInfo {
+    peerId: string;
+    addresses: string[];
+    lastSeen: number;
+    cryptoIPv6?: string;
+    stores?: string[];
+    capabilities?: any;
+}
 export declare class GlobalDiscovery {
     private peerId;
     private addresses;
     private cryptoIPv6;
     private getStores;
+    private privacyMode;
     private logger;
-    private knownPeers;
+    knownPeers: Map<string, PeerInfo>;
     private discoveryServers;
     private registrationInterval;
     private discoveryInterval;
-    constructor(peerId: string, addresses: string[], cryptoIPv6: string, getStores: () => string[], customBootstrapServers?: string[]);
+    constructor(peerId: string, addresses: string[], cryptoIPv6: string, getStores: () => string[], customBootstrapServers?: string[], privacyMode?: boolean);
     start(): Promise<void>;
     stop(): Promise<void>;
     private registerWithDiscoveryServers;

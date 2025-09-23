@@ -24,6 +24,8 @@ export interface DIGNodeConfig {
     enableGlobalDiscovery?: boolean;
     enableTurnServer?: boolean;
     turnPort?: number;
+    privacyMode?: boolean;
+    enableCryptoIPv6Overlay?: boolean;
 }
 export interface NodeCapabilities {
     libp2p: boolean;
@@ -42,7 +44,7 @@ export interface NodeCapabilities {
     environment: 'development' | 'production' | 'aws';
 }
 export interface DIGRequest {
-    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE';
+    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY';
     storeId?: string;
     filePath?: string;
     urn?: string;
@@ -53,6 +55,10 @@ export interface DIGRequest {
     supportedFeatures?: string[];
     publicKey?: string;
     encryptedPayload?: string;
+    maxPeers?: number;
+    includeStores?: boolean;
+    includeCapabilities?: boolean;
+    privacyMode?: boolean;
 }
 export interface DIGResponse {
     success: boolean;
@@ -71,6 +77,10 @@ export interface DIGResponse {
     supportedFeatures?: string[];
     publicKey?: string;
     encryptedPayload?: string;
+    peers?: any[];
+    totalPeers?: number;
+    privacyMode?: boolean;
+    timestamp?: number;
 }
 export interface DIGPeer {
     peerId: string;

@@ -31,6 +31,8 @@ export interface DIGNodeConfig {
   enableGlobalDiscovery?: boolean;
   enableTurnServer?: boolean; // Act as TURN server for other nodes
   turnPort?: number; // Port for TURN server functionality
+  privacyMode?: boolean; // Only use crypto-IPv6 addresses, hide real IPs
+  enableCryptoIPv6Overlay?: boolean; // Create IPv6 overlay network
 }
 
 export interface NodeCapabilities {
@@ -51,7 +53,7 @@ export interface NodeCapabilities {
 }
 
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY';
   storeId?: string;
   filePath?: string;
   urn?: string;
@@ -64,6 +66,11 @@ export interface DIGRequest {
   supportedFeatures?: string[];
   publicKey?: string; // For end-to-end encryption
   encryptedPayload?: string; // Encrypted request data
+  // Peer exchange protocol
+  maxPeers?: number;
+  includeStores?: boolean;
+  includeCapabilities?: boolean;
+  privacyMode?: boolean;
 }
 
 export interface DIGResponse {
@@ -85,6 +92,11 @@ export interface DIGResponse {
   supportedFeatures?: string[];
   publicKey?: string; // For end-to-end encryption
   encryptedPayload?: string; // Encrypted response data
+  // Peer exchange response
+  peers?: any[];
+  totalPeers?: number;
+  privacyMode?: boolean;
+  timestamp?: number;
 }
 
 export interface DIGPeer {
