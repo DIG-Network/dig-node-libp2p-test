@@ -117,6 +117,16 @@ export class WebSocketRelay {
         }
       });
 
+      this.socket.on('turn-peer-exchange-request', (data) => {
+        const { requestId, toPeerId, method, maxPeers, includeCapabilities } = data;
+        this.logger.info(`📋 TURN peer exchange request received for ${toPeerId} (method: ${method})`);
+        
+        const handler = this.messageHandlers.get('turn-peer-exchange-request');
+        if (handler) {
+          handler({ requestId, toPeerId, method, maxPeers, includeCapabilities });
+        }
+      });
+
       this.socket.on('disconnect', () => {
         this.logger.warn('📡 Disconnected from relay server');
       });
@@ -228,6 +238,23 @@ export class WebSocketRelay {
     });
 
     this.logger.debug(`📡 Bootstrap TURN response sent for request ${requestId}: ${success ? 'success' : 'failed'}`);
+  }
+
+  // Send TURN peer exchange response
+  sendTurnPeerExchangeResponse(requestId: string, success: boolean, peers?: any[], error?: string): void {
+    if (!this.socket?.connected) {
+      this.logger.error('Cannot send TURN peer exchange response: not connected');
+      return;
+    }
+
+    this.socket.emit('turn-peer-exchange-response', {
+      requestId,
+      success,
+      peers,
+      error
+    });
+
+    this.logger.debug(`📋 TURN peer exchange response sent for request ${requestId}: ${success ? 'success' : 'failed'}`);
   }
 
   // Get relay server URL

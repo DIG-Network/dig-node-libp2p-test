@@ -1482,7 +1482,496 @@ export class DIGNode {
       storeSync: (peer.stores && peer.stores.length > 0) || false,
       e2eEncryption: true, // Assume true for privacy
       protocolVersion: peer.version || '1.0.0',
-      environment: 'unknown'
+      environment: 'development'
+    }
+  }
+
+  // Enhanced store download with multiple fallback layers (bootstrap server last resort)
+  async downloadStoreWithFullFallback(storeId: string): Promise<boolean> {
+    this.logger.info(`📥 Starting comprehensive download for store: ${storeId}`)
+    
+    // Layer 1: Direct LibP2P connections to known peers
+    try {
+      this.logger.info('🔗 Attempting direct LibP2P download...')
+      await this.downloadStoreFromPeers(storeId)
+      const success = this.digFiles.has(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via direct LibP2P`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('Direct LibP2P download failed:', error)
+    }
+
+    // Layer 2: DHT-based store discovery and download
+    try {
+      this.logger.info('🔑 Attempting DHT-based store discovery...')
+      const success = await this.downloadStoreFromDHT(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via DHT`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('DHT store download failed:', error)
+    }
+
+    // Layer 3: Gossip network store discovery
+    try {
+      this.logger.info('🗣️ Attempting gossip-based store discovery...')
+      const success = await this.downloadStoreFromGossipNetwork(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via gossip network`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('Gossip store download failed:', error)
+    }
+
+    // Layer 4: Distributed TURN servers (peer-to-peer)
+    try {
+      this.logger.info('📡 Attempting distributed TURN server download...')
+      const success = await this.downloadStoreFromDistributedTurn(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via distributed TURN servers`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('Distributed TURN download failed:', error)
+    }
+
+    // Layer 5: Mesh routing through connected peers
+    try {
+      this.logger.info('🕸️ Attempting mesh routing discovery...')
+      const success = await this.downloadStoreViaMeshRouting(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via mesh routing`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('Mesh routing download failed:', error)
+    }
+
+    // Layer 6: Bootstrap server TURN fallback
+    try {
+      this.logger.info('☁️ Attempting bootstrap server TURN fallback...')
+      const success = await this.downloadStoreViaBootstrapTurn(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via bootstrap TURN fallback`)
+        return true
+      }
+    } catch (error) {
+      this.logger.debug('Bootstrap TURN fallback failed:', error)
+    }
+
+    // Layer 7: Bootstrap server direct download (absolute last resort)
+    try {
+      this.logger.warn('⚠️ LAST RESORT: Using bootstrap server direct download...')
+      await this.downloadStoreViaBootstrap(storeId)
+      const success = this.digFiles.has(storeId)
+      if (success) {
+        this.logger.info(`✅ Downloaded ${storeId} via bootstrap server (last resort)`)
+        return true
+      }
+    } catch (error) {
+      this.logger.error('All download methods failed:', error)
+    }
+
+    this.logger.error(`❌ Failed to download store ${storeId} from all available sources`)
+    return false
+  }
+
+  // DHT-based store discovery and download
+  private async downloadStoreFromDHT(storeId: string): Promise<boolean> {
+    try {
+      const dht = this.node.services.dht as any
+      if (!dht) {
+        throw new Error('DHT service not available')
+      }
+
+      // Search for store in DHT
+      const key = uint8ArrayFromString(`/dig-store/${storeId}`)
+      
+      for await (const event of dht.get(key)) {
+        if (event.name === 'VALUE') {
+          try {
+            const storeInfo = JSON.parse(uint8ArrayToString(event.value))
+            const { peerId, cryptoIPv6, size } = storeInfo
+
+            if (peerId === this.node.peerId.toString()) {
+              continue // Skip our own store
+            }
+
+            this.logger.info(`🔑 Found store ${storeId} in DHT: peer ${peerId} (${cryptoIPv6})`)
+
+            // Try to download from this peer
+            const success = await this.downloadStoreFromSpecificPeer(storeId, peerId, cryptoIPv6)
+            if (success) {
+              return true
+            }
+
+          } catch (parseError) {
+            this.logger.debug('Failed to parse DHT store info:', parseError)
+          }
+        }
+      }
+
+      throw new Error('Store not found in DHT')
+
+    } catch (error) {
+      this.logger.debug(`DHT store discovery failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Gossip network store discovery
+  private async downloadStoreFromGossipNetwork(storeId: string): Promise<boolean> {
+    try {
+      // Check our gossip-discovered peers for the store
+      for (const [peerId, peerInfo] of this.privacyOverlayPeers) {
+        if (peerInfo.stores?.includes(storeId)) {
+          this.logger.info(`🗣️ Found store ${storeId} via gossip: peer ${peerId}`)
+          
+          const success = await this.downloadStoreFromSpecificPeer(storeId, peerId, peerInfo.cryptoIPv6)
+          if (success) {
+            return true
+          }
+        }
+      }
+
+      // Ask connected peers if they know about this store
+      const connectedPeers = this.node.getPeers()
+      for (const peer of connectedPeers.slice(0, 3)) {
+        try {
+          const storeLocation = await this.queryPeerForStore(peer.toString(), storeId)
+          if (storeLocation) {
+            const success = await this.downloadStoreFromSpecificPeer(storeId, storeLocation.peerId, storeLocation.cryptoIPv6)
+            if (success) {
+              return true
+            }
+          }
+        } catch (error) {
+          this.logger.debug(`Failed to query ${peer.toString()} for store:`, error)
+        }
+      }
+
+      throw new Error('Store not found in gossip network')
+
+    } catch (error) {
+      this.logger.debug(`Gossip store discovery failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Distributed TURN server download (using privacy-discovered TURN servers)
+  private async downloadStoreFromDistributedTurn(storeId: string): Promise<boolean> {
+    try {
+      const turnServers = this.getPrivacyTurnServers()
+      if (turnServers.length === 0) {
+        throw new Error('No TURN servers available in privacy network')
+      }
+
+      this.logger.info(`📡 Found ${turnServers.length} distributed TURN servers`)
+
+      // Find which peer has the store
+      let sourcePeer: any = null
+      for (const [peerId, peerInfo] of this.privacyOverlayPeers) {
+        if (peerInfo.stores?.includes(storeId)) {
+          sourcePeer = { peerId, cryptoIPv6: peerInfo.cryptoIPv6 }
+          break
+        }
+      }
+
+      if (!sourcePeer) {
+        throw new Error('No peer found with the store in privacy network')
+      }
+
+      // Try each TURN server
+      for (const turnServer of turnServers) {
+        try {
+          this.logger.info(`📡 Attempting download via TURN server: ${turnServer.peerId}`)
+          
+          const success = await this.downloadStoreViaPeerTurn(storeId, sourcePeer, turnServer)
+          if (success) {
+            return true
+          }
+
+        } catch (error) {
+          this.logger.debug(`TURN server ${turnServer.peerId} failed:`, error)
+          continue
+        }
+      }
+
+      throw new Error('All distributed TURN servers failed')
+
+    } catch (error) {
+      this.logger.debug(`Distributed TURN download failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Mesh routing through connected peers
+  private async downloadStoreViaMeshRouting(storeId: string): Promise<boolean> {
+    try {
+      const connectedPeers = this.node.getPeers()
+      
+      this.logger.info(`🕸️ Using mesh routing through ${connectedPeers.length} connected peers`)
+
+      // Ask each connected peer to help find the store
+      for (const peer of connectedPeers) {
+        try {
+          // Request peer to search their network for the store
+          const storeRoute = await this.requestStoreRoute(peer.toString(), storeId)
+          
+          if (storeRoute && storeRoute.length > 0) {
+            // Try to download through the discovered route
+            const success = await this.downloadStoreViaRoute(storeId, storeRoute)
+            if (success) {
+              return true
+            }
+          }
+
+        } catch (error) {
+          this.logger.debug(`Mesh routing via ${peer.toString()} failed:`, error)
+        }
+      }
+
+      throw new Error('No mesh routes found for store')
+
+    } catch (error) {
+      this.logger.debug(`Mesh routing failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Bootstrap server TURN fallback (proper implementation)
+  private async downloadStoreViaBootstrapTurn(storeId: string): Promise<boolean> {
+    try {
+      const bootstrapUrl = this.config.discoveryServers?.[0]
+      if (!bootstrapUrl) {
+        throw new Error('No bootstrap server configured')
+      }
+
+      // First, find which peer has the store
+      const peersResponse = await fetch(`${bootstrapUrl}/peers?includeStores=true&includeCapabilities=true`)
+      if (!peersResponse.ok) {
+        throw new Error('Failed to get peers from bootstrap')
+      }
+
+      const peersData = await peersResponse.json()
+      const sourcePeer = peersData.peers?.find((p: any) => 
+        p.peerId !== this.node.peerId.toString() && 
+        p.stores?.includes(storeId)
+      )
+
+      if (!sourcePeer) {
+        throw new Error('No peer found with the store')
+      }
+
+      this.logger.info(`☁️ Found store ${storeId} on peer ${sourcePeer.peerId}, using bootstrap TURN`)
+
+      // Request bootstrap server to act as TURN relay
+      const turnResponse = await fetch(`${bootstrapUrl}/bootstrap-turn-relay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeId,
+          fromPeerId: sourcePeer.peerId,
+          toPeerId: this.node.peerId.toString()
+        })
+      })
+
+      if (turnResponse.ok) {
+        const storeContent = await turnResponse.arrayBuffer()
+        
+        // Decrypt if encrypted
+        let finalContent: Buffer
+        if (this.e2eEncryption.hasSharedSecret(sourcePeer.peerId)) {
+          const encryptedBase64 = Buffer.from(storeContent).toString('base64')
+          finalContent = this.e2eEncryption.decryptFromPeer(sourcePeer.peerId, encryptedBase64)
+          this.logger.info(`🔐 Decrypted store from ${sourcePeer.peerId} via bootstrap TURN`)
+        } else {
+          finalContent = Buffer.from(storeContent)
+          this.logger.warn(`⚠️ No encryption with ${sourcePeer.peerId}, using unencrypted bootstrap TURN`)
+        }
+
+        // Save the store
+        const filePath = join(this.digPath, `${storeId}.dig`)
+        await writeFile(filePath, finalContent)
+        await this.loadDIGFile(filePath)
+
+        if (this.digFiles.has(storeId)) {
+          await this.announceStore(storeId)
+          this.metrics.downloadSuccesses++
+          return true
+        }
+      }
+
+      throw new Error('Bootstrap TURN relay failed')
+
+    } catch (error) {
+      this.logger.debug(`Bootstrap TURN fallback failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Download from specific peer using crypto-IPv6 resolution
+  private async downloadStoreFromSpecificPeer(storeId: string, peerId: string, cryptoIPv6: string): Promise<boolean> {
+    try {
+      // Resolve peer's real addresses
+      const realAddresses = await this.resolveDistributedPeerAddresses(peerId, cryptoIPv6)
+      
+      if (realAddresses.length === 0) {
+        throw new Error(`Cannot resolve addresses for peer ${peerId}`)
+      }
+
+      // Try to connect and download
+      for (const address of realAddresses) {
+        try {
+          const peer = this.node.getPeers().find(p => p.toString() === peerId)
+          if (peer) {
+            // Already connected, use existing connection
+            await this.downloadStoreFromLibP2PPeer(peerId, peer.toString(), storeId)
+            const success = this.digFiles.has(storeId)
+            if (success) {
+              return true
+            }
+          } else {
+            // Need to establish connection first
+            const addr = multiaddr(address)
+            const connection = await this.node.dial(addr)
+            
+            if (connection) {
+              await this.downloadStoreFromLibP2PPeer(peerId, connection.remotePeer.toString(), storeId)
+              const success = this.digFiles.has(storeId)
+              if (success) {
+                return true
+              }
+            }
+          }
+        } catch (error) {
+          this.logger.debug(`Failed to download from ${address}:`, error)
+        }
+      }
+
+      throw new Error(`Failed to download from peer ${peerId}`)
+
+    } catch (error) {
+      this.logger.debug(`Specific peer download failed for ${storeId} from ${peerId}:`, error)
+      return false
+    }
+  }
+
+  // Query peer for store location
+  private async queryPeerForStore(peerId: string, storeId: string): Promise<{peerId: string, cryptoIPv6: string} | null> {
+    try {
+      const peer = this.node.getPeers().find(p => p.toString() === peerId)
+      if (!peer) {
+        return null
+      }
+
+      const stream = await this.node.dialProtocol(peer, DIG_PROTOCOL)
+      
+      const request: DIGRequest = {
+        type: 'PRIVACY_PEER_DISCOVERY',
+        storeId, // Looking for this specific store
+        maxPeers: 5,
+        includeStores: true,
+        includeCapabilities: true,
+        privacyMode: true
+      }
+
+      // Send request
+      await pipe(async function* () {
+        yield uint8ArrayFromString(JSON.stringify(request))
+      }, stream.sink)
+
+      // Read response
+      const chunks: Uint8Array[] = []
+      await pipe(stream.source, async function (source) {
+        for await (const chunk of source) {
+          chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray()))
+        }
+      })
+
+      if (chunks.length > 0) {
+        const response = JSON.parse(uint8ArrayToString(chunks[0]))
+        if (response.success && response.peers) {
+          // Find peer with the store
+          const peerWithStore = response.peers.find((p: any) => p.stores?.includes(storeId))
+          if (peerWithStore) {
+            return {
+              peerId: peerWithStore.peerId,
+              cryptoIPv6: peerWithStore.cryptoIPv6
+            }
+          }
+        }
+      }
+
+    } catch (error) {
+      this.logger.debug(`Failed to query ${peerId} for store ${storeId}:`, error)
+    }
+
+    return null
+  }
+
+  // Download via peer TURN server
+  private async downloadStoreViaPeerTurn(storeId: string, sourcePeer: any, turnServer: any): Promise<boolean> {
+    try {
+      // This would use the peer's TURN server to relay the data
+      // For now, implement as a direct connection with TURN coordination
+      
+      this.logger.info(`📡 Coordinating TURN relay: ${sourcePeer.peerId} → ${turnServer.peerId} → ${this.node.peerId.toString()}`)
+
+      // In a full implementation, this would:
+      // 1. Establish TURN relay session with turnServer.peerId
+      // 2. Request sourcePeer.peerId to send data through the TURN relay
+      // 3. Receive and decrypt the data
+      
+      // For now, fall back to direct connection
+      const success = await this.downloadStoreFromSpecificPeer(storeId, sourcePeer.peerId, sourcePeer.cryptoIPv6)
+      return success
+
+    } catch (error) {
+      this.logger.debug(`Peer TURN download failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Download via route discovery (mesh routing)
+  private async downloadStoreViaRoute(storeId: string, route: any[]): Promise<boolean> {
+    try {
+      if (route.length === 0) {
+        throw new Error('Empty route')
+      }
+
+      // Use the first peer in the route
+      const targetPeer = route[0]
+      this.logger.info(`🕸️ Downloading via mesh route: ${targetPeer.peerId}`)
+
+      const success = await this.downloadStoreFromSpecificPeer(storeId, targetPeer.peerId, targetPeer.cryptoIPv6)
+      return success
+
+    } catch (error) {
+      this.logger.debug(`Route download failed for ${storeId}:`, error)
+      return false
+    }
+  }
+
+  // Request store route from peer
+  private async requestStoreRoute(peerId: string, storeId: string): Promise<any[]> {
+    try {
+      // Request peer to search their network for store routes
+      const peers = await this.requestPeersFromNode(peerId, true)
+      
+      // Filter peers that have the store
+      const peersWithStore = peers.filter(p => p.stores?.includes(storeId))
+      
+      this.logger.debug(`🕸️ Found ${peersWithStore.length} route options for ${storeId} via ${peerId}`)
+      return peersWithStore
+
+    } catch (error) {
+      this.logger.debug(`Route request failed for ${storeId} via ${peerId}:`, error)
+      return []
     }
   }
 
@@ -2349,9 +2838,9 @@ export class DIGNode {
       if (missingStores.length > 0) {
         console.log(`📥 Found ${missingStores.length} missing stores to download via LibP2P`)
         
-        // Download missing stores from LibP2P connected peers first
+        // Download missing stores using comprehensive fallback (bootstrap server last resort)
         for (const storeId of missingStores) {
-          await this.downloadStoreFromPeers(storeId)
+          await this.downloadStoreWithFullFallback(storeId)
         }
         this.metrics.syncSuccesses++
       }
@@ -2903,6 +3392,33 @@ export class DIGNode {
         } catch (error) {
           this.webSocketRelay.sendStoreResponse(requestId, null, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
           this.logger.error(`❌ Error handling store request:`, error);
+        }
+      });
+
+      // Set up TURN peer exchange request handler
+      this.webSocketRelay.onMessage('turn-peer-exchange-request', async (data) => {
+        const { requestId, toPeerId, method, maxPeers, includeCapabilities } = data;
+        this.logger.info(`📋 TURN peer exchange request for ${toPeerId} (method: ${method})`);
+        
+        try {
+          // Get our known peers to share via TURN
+          const peersToShare = await this.handlePeerExchangeRequest({
+            maxPeers,
+            includeStores: true,
+            includeCapabilities,
+            privacyMode: true
+          }, toPeerId);
+
+          if (peersToShare.success) {
+            this.webSocketRelay.sendTurnPeerExchangeResponse(requestId, true, peersToShare.peers);
+            this.logger.info(`📡 Shared ${peersToShare.peers?.length || 0} peers via TURN exchange`);
+          } else {
+            this.webSocketRelay.sendTurnPeerExchangeResponse(requestId, false, undefined, peersToShare.error);
+          }
+          
+        } catch (error) {
+          this.webSocketRelay.sendTurnPeerExchangeResponse(requestId, false, undefined, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          this.logger.error(`❌ Error handling TURN peer exchange:`, error);
         }
       });
       

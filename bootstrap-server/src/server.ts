@@ -36,7 +36,9 @@ interface RegisteredPeer {
   stores: string[]
   version: string
   privacyMode?: boolean
+  capabilities?: any // Full capability object
   turnCapable?: boolean
+  bootstrapCapable?: boolean
   turnAddresses?: string[]
   turnPort?: number
   turnLoad?: number
@@ -151,6 +153,7 @@ app.post('/register', (req: Request, res: Response) => {
 app.get('/peers', (req: Request, res: Response) => {
   try {
     const includeStores = req.query.includeStores === 'true'
+    const includeCapabilities = req.query.includeCapabilities === 'true'
     const now = Date.now()
     
     // Clean up expired peers
@@ -170,7 +173,10 @@ app.get('/peers', (req: Request, res: Response) => {
         stores: includeStores ? peer.stores : undefined,
         lastSeen: peer.lastSeen,
         version: peer.version,
-        turnCapable: peer.turnCapable
+        turnCapable: peer.turnCapable,
+        bootstrapCapable: peer.bootstrapCapable,
+        capabilities: includeCapabilities ? peer.capabilities : undefined,
+        privacyMode: peer.privacyMode
       }))
 
     res.json({
@@ -455,6 +461,73 @@ app.get('/crypto-ipv6-directory', (req: Request, res: Response) => {
   }
 })
 
+// Peer exchange over TURN (enable peer sharing through TURN relay)
+app.post('/turn-peer-exchange', (req: Request, res: Response) => {
+  try {
+    const { fromPeerId, toPeerId, maxPeers = 10, includeCapabilities = true } = req.body
+    
+    if (!fromPeerId || !toPeerId) {
+      return res.status(400).json({ error: 'Missing required fields: fromPeerId, toPeerId' })
+    }
+
+    const sourcePeer = registeredPeers.get(fromPeerId)
+    const targetPeer = registeredPeers.get(toPeerId)
+    
+    if (!sourcePeer || !targetPeer) {
+      return res.status(404).json({ error: 'One or both peers not found' })
+    }
+
+    console.log(`📋 TURN peer exchange: ${fromPeerId} sharing peers with ${toPeerId}`)
+
+    // Find the source peer's socket connection
+    const sourceSocket = Array.from(io.sockets.sockets.values())
+      .find(socket => (socket as ExtendedSocket).peerId === fromPeerId) as ExtendedSocket
+    
+    if (!sourceSocket) {
+      return res.status(404).json({ error: 'Source peer not connected via WebSocket' })
+    }
+
+    // Create unique request ID
+    const requestId = `turn_peer_exchange_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
+    // Set up response handler
+    const responseTimeout = setTimeout(() => {
+      console.log(`⏱️ TURN peer exchange timeout for request ${requestId}`)
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'Peer exchange timeout' })
+      }
+    }, 15000) // 15 second timeout
+
+    // Store the HTTP response object
+    if (!global.pendingBootstrapTurnRequests) {
+      global.pendingBootstrapTurnRequests = new Map()
+    }
+    global.pendingBootstrapTurnRequests.set(requestId, {
+      res,
+      timeout: responseTimeout,
+      isRangeRequest: false,
+      requestId,
+      startTime: Date.now()
+    })
+
+    // Send peer exchange request to source peer
+    const requestData = {
+      toPeerId,
+      requestId,
+      method: 'turn-peer-exchange',
+      maxPeers,
+      includeCapabilities
+    }
+    
+    console.log(`📡 Requesting peer list from ${fromPeerId} for TURN relay to ${toPeerId}`)
+    sourceSocket.emit('turn-peer-exchange-request', requestData)
+
+  } catch (error) {
+    console.error('TURN peer exchange error:', error)
+    res.status(500).json({ error: 'TURN peer exchange failed' })
+  }
+})
+
 // Bootstrap server acting as fallback TURN server
 app.post('/bootstrap-turn-relay', (req: Request, res: Response) => {
   try {
@@ -553,6 +626,49 @@ io.on('connection', (socket: Socket) => {
   })
 
   // Handle bootstrap TURN relay responses
+  // Handle TURN peer exchange responses
+  socket.on('turn-peer-exchange-response', (data: any) => {
+    const { requestId, success, error, peers } = data
+    
+    if (!global.pendingBootstrapTurnRequests) {
+      console.log(`⚠️ No pending requests map for TURN peer exchange response ${requestId}`)
+      return
+    }
+    
+    const pendingRequest = global.pendingBootstrapTurnRequests.get(requestId)
+    if (!pendingRequest) {
+      console.log(`⚠️ No pending request found for TURN peer exchange response ${requestId}`)
+      return
+    }
+    
+    // Clear timeout
+    clearTimeout(pendingRequest.timeout)
+    global.pendingBootstrapTurnRequests.delete(requestId)
+    
+    const { res, startTime } = pendingRequest
+    const duration = Date.now() - startTime
+    
+    if (res.headersSent) {
+      console.log(`⚠️ HTTP response already sent for request ${requestId}`)
+      return
+    }
+    
+    if (!success || error) {
+      console.log(`❌ TURN peer exchange failed for ${requestId}: ${error}`)
+      return res.status(500).json({ error: error || 'Peer exchange failed' })
+    }
+    
+    console.log(`✅ TURN peer exchange completed for ${requestId}: ${peers?.length || 0} peers in ${duration}ms`)
+    
+    res.json({
+      success: true,
+      peers: peers || [],
+      totalPeers: peers?.length || 0,
+      method: 'turn-peer-exchange',
+      duration
+    })
+  })
+
   socket.on('bootstrap-turn-response', (data: any) => {
     const { requestId, success, error, storeData, size } = data
     
