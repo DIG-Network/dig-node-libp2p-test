@@ -13,6 +13,8 @@
     "bootstrap:prod": "NODE_ENV=production node dist/examples/dedicated-bootstrap.js",
     "dev": "tsx examples/unified-dig-node.ts",
     "unified": "tsx examples/unified-dig-node.ts",
+    "hotel-test": "tsx examples/hotel-network-test.ts",
+    "connect-local": "tsx examples/connect-local-dig-peers.ts",
     "gateway": "tsx examples/gateway-server.ts",
     "docker:build": "docker build -t dig-bootstrap .",
     "build-sw": "tsc src/service-worker/dig-service-worker.ts --outDir public --target es2020 --lib es2020,webworker --skipLibCheck",
