@@ -136,20 +136,39 @@ export class PeerConnectionCapabilities {
   private setupPeerCapabilityMonitoring(): void {
     // Monitor new peer connections
     this.digNode.node.addEventListener('peer:connect', async (evt: any) => {
-      const connection = evt.detail
-      const peerId = connection.remotePeer.toString()
-      
-      // Test connection capabilities for new peers
-      setTimeout(async () => {
-        await this.testPeerConnectionCapabilities(peerId, connection)
-      }, 2000) // Wait for connection to stabilize
+      try {
+        const connection = evt.detail
+        
+        // Safely get peer ID with null checks
+        const remotePeer = connection?.remotePeer
+        if (!remotePeer) {
+          this.logger.debug('⏭️ Connection event without remote peer in capability monitoring')
+          return
+        }
+        
+        const peerId = remotePeer.toString()
+        
+        // Test connection capabilities for new peers
+        setTimeout(async () => {
+          await this.testPeerConnectionCapabilities(peerId, connection)
+        }, 2000) // Wait for connection to stabilize
+      } catch (error) {
+        this.logger.debug('Peer capability monitoring error:', error)
+      }
     })
 
     // Monitor peer disconnections
     this.digNode.node.addEventListener('peer:disconnect', (evt: any) => {
-      const peerId = evt.detail.toString()
-      this.peerCapabilities.delete(peerId)
-      this.connectionTestResults.delete(peerId)
+      try {
+        const peerId = evt.detail?.toString()
+        if (peerId) {
+          this.peerCapabilities.delete(peerId)
+          this.connectionTestResults.delete(peerId)
+          this.logger.debug(`🧹 Removed capabilities for disconnected peer: ${peerId}`)
+        }
+      } catch (error) {
+        this.logger.debug('Peer disconnect monitoring error:', error)
+      }
     })
   }
 
@@ -344,28 +363,45 @@ export class PeerConnectionCapabilities {
         }
       }
 
-      // Announce via gossip
-      const gossipsub = this.digNode.node.services.gossipsub
-      if (gossipsub) {
-        const { fromString: uint8ArrayFromString } = await import('uint8arrays')
-        await gossipsub.publish(
-          'dig-peer-connection-capabilities',
-          uint8ArrayFromString(JSON.stringify(announcement))
-        )
+      let gossipSuccess = false
+      let dhtSuccess = false
+
+      // Try GossipSub announcement
+      try {
+        const gossipsub = this.digNode.node.services.gossipsub
+        if (gossipsub) {
+          const { fromString: uint8ArrayFromString } = await import('uint8arrays')
+          await gossipsub.publish(
+            'dig-peer-connection-capabilities',
+            uint8ArrayFromString(JSON.stringify(announcement))
+          )
+          gossipSuccess = true
+        }
+      } catch (gossipError) {
+        this.logger.debug('Capabilities GossipSub announcement failed (expected with no DIG peers):', gossipError)
       }
 
-      // Store in DHT for persistence
-      const dht = this.digNode.node.services.dht
-      if (dht) {
-        const key = new TextEncoder().encode(`/dig-capabilities/${this.digNode.node.peerId.toString()}`)
-        const value = new TextEncoder().encode(JSON.stringify(announcement))
-        await dht.put(key, value)
+      // Try DHT storage
+      try {
+        const dht = this.digNode.node.services.dht
+        if (dht) {
+          const key = new TextEncoder().encode(`/dig-capabilities/${this.digNode.node.peerId.toString()}`)
+          const value = new TextEncoder().encode(JSON.stringify(announcement))
+          await dht.put(key, value)
+          dhtSuccess = true
+        }
+      } catch (dhtError) {
+        this.logger.debug('Capabilities DHT storage failed (expected during bootstrap):', dhtError)
       }
 
-      this.logger.info(`📡 Announced capabilities: ${capabilities.acceptsDirectConnections ? 'Direct+TURN' : 'NAT-only'}`)
+      if (gossipSuccess || dhtSuccess) {
+        this.logger.info(`📡 Announced capabilities: ${capabilities.acceptsDirectConnections ? 'Direct+TURN' : 'NAT-only'}`)
+      } else {
+        this.logger.debug('⏳ Capability announcement deferred (DHT/Gossip not ready)')
+      }
 
     } catch (error) {
-      this.logger.error('Failed to announce capabilities:', error)
+      this.logger.debug('Capability announcement failed (will retry):', error)
     }
   }
 

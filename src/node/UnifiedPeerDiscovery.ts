@@ -207,7 +207,7 @@ export class UnifiedPeerDiscovery {
     }
   }
 
-  // Announce ourselves to DIG network
+  // Announce ourselves to DIG network (with retry logic)
   private async announceToDIGNetwork(): Promise<void> {
     try {
       const announcement = {
@@ -219,27 +219,65 @@ export class UnifiedPeerDiscovery {
         timestamp: Date.now()
       }
 
-      // Announce via DHT
-      const dht = this.digNode.node.services.dht
-      if (dht) {
-        const key = new TextEncoder().encode(`/dig-network-v1/peers/${announcement.peerId}`)
-        const value = new TextEncoder().encode(JSON.stringify(announcement))
-        await dht.put(key, value)
+      let dhtSuccess = false
+      let gossipSuccess = false
+
+      // Try DHT announcement (may fail if DHT not ready)
+      try {
+        const dht = this.digNode.node.services.dht
+        if (dht) {
+          const key = new TextEncoder().encode(`/dig-network-v1/peers/${announcement.peerId}`)
+          const value = new TextEncoder().encode(JSON.stringify(announcement))
+          await dht.put(key, value)
+          dhtSuccess = true
+          this.logger.debug('📡 DHT announcement successful')
+        } else {
+          this.logger.debug('⏭️ DHT not available for announcement')
+        }
+      } catch (dhtError) {
+        this.logger.debug('DHT announcement failed (expected during bootstrap):', dhtError)
       }
 
-      // Announce via GossipSub
-      const gossipsub = this.digNode.node.services.gossipsub
-      if (gossipsub) {
-        const { fromString: uint8ArrayFromString } = await import('uint8arrays')
-        await gossipsub.publish(
-          'dig-network-announcements',
-          uint8ArrayFromString(JSON.stringify(announcement))
-        )
+      // Try GossipSub announcement (may fail if no DIG peers subscribed)
+      try {
+        const gossipsub = this.digNode.node.services.gossipsub
+        if (gossipsub) {
+          const { fromString: uint8ArrayFromString } = await import('uint8arrays')
+          await gossipsub.publish(
+            'dig-network-announcements',
+            uint8ArrayFromString(JSON.stringify(announcement))
+          )
+          gossipSuccess = true
+          this.logger.debug('📡 GossipSub announcement successful')
+        } else {
+          this.logger.debug('⏭️ GossipSub not available for announcement')
+        }
+      } catch (gossipError) {
+        this.logger.debug('GossipSub announcement failed (expected with no DIG peers):', gossipError)
       }
 
-      this.logger.info('📡 Announced to DIG network')
+      if (dhtSuccess || gossipSuccess) {
+        this.logger.info('📡 Announced to DIG network')
+      } else {
+        this.logger.debug('⏳ DIG network announcement deferred (no DHT/Gossip peers yet)')
+        
+        // Schedule retry in 30 seconds
+        setTimeout(() => {
+          this.announceToDIGNetwork().catch(error => {
+            this.logger.debug('DIG network announcement retry failed:', error)
+          })
+        }, 30000)
+      }
+
     } catch (error) {
-      this.logger.error('Failed to announce to DIG network:', error)
+      this.logger.debug('DIG network announcement failed (will retry):', error)
+      
+      // Schedule retry in 60 seconds
+      setTimeout(() => {
+        this.announceToDIGNetwork().catch(error => {
+          this.logger.debug('DIG network announcement retry failed:', error)
+        })
+      }, 60000)
     }
   }
 

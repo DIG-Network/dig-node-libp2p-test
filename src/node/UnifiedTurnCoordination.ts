@@ -170,27 +170,47 @@ export class UnifiedTurnCoordination {
         timestamp: Date.now()
       }
 
-      // Announce via DHT
-      const dht = this.digNode.node.services.dht
-      if (dht) {
-        const key = new TextEncoder().encode('/dig-turn-servers/registry')
-        const value = new TextEncoder().encode(JSON.stringify(announcement))
-        await dht.put(key, value)
+      let dhtSuccess = false
+      let gossipSuccess = false
+
+      // Try DHT announcement (may fail if DHT not ready)
+      try {
+        const dht = this.digNode.node.services.dht
+        if (dht) {
+          const key = new TextEncoder().encode('/dig-turn-servers/registry')
+          const value = new TextEncoder().encode(JSON.stringify(announcement))
+          await dht.put(key, value)
+          dhtSuccess = true
+          this.logger.debug('📡 TURN DHT announcement successful')
+        }
+      } catch (dhtError) {
+        this.logger.debug('TURN DHT announcement failed (expected during bootstrap):', dhtError)
       }
 
-      // Announce via gossip
-      const gossipsub = this.digNode.node.services.gossipsub
-      if (gossipsub) {
-        const { fromString: uint8ArrayFromString } = await import('uint8arrays')
-        await gossipsub.publish(
-          'dig-turn-server-announcements',
-          uint8ArrayFromString(JSON.stringify(announcement))
-        )
+      // Try GossipSub announcement (may fail if no DIG peers subscribed)
+      try {
+        const gossipsub = this.digNode.node.services.gossipsub
+        if (gossipsub) {
+          const { fromString: uint8ArrayFromString } = await import('uint8arrays')
+          await gossipsub.publish(
+            'dig-turn-server-announcements',
+            uint8ArrayFromString(JSON.stringify(announcement))
+          )
+          gossipSuccess = true
+          this.logger.debug('📡 TURN GossipSub announcement successful')
+        }
+      } catch (gossipError) {
+        this.logger.debug('TURN GossipSub announcement failed (expected with no DIG peers):', gossipError)
       }
 
-      this.logger.info('📡 Announced TURN capability')
+      if (dhtSuccess || gossipSuccess) {
+        this.logger.info('📡 Announced TURN capability')
+      } else {
+        this.logger.debug('⏳ TURN announcement deferred (DHT/Gossip not ready)')
+      }
+
     } catch (error) {
-      this.logger.error('Failed to announce TURN capability:', error)
+      this.logger.debug('TURN capability announcement failed (will retry):', error)
     }
   }
 
