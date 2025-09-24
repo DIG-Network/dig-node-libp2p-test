@@ -50,7 +50,7 @@ import {
 } from './types.js'
 import { generateCryptoIPv6, parseURN, createCryptoIPv6Addresses, resolveCryptoIPv6, isCryptoIPv6Address } from './utils.js'
 import { Logger } from './logger.js'
-import { UnifiedPeerDiscovery } from './UnifiedPeerDiscovery.js'
+import { DIGOnlyPeerDiscovery } from './DIGOnlyPeerDiscovery.js'
 import { UnifiedTurnCoordination } from './UnifiedTurnCoordination.js'
 import { PeerConnectionCapabilities } from './PeerConnectionCapabilities.js'
 import { ComprehensiveNATTraversal } from './ComprehensiveNATTraversal.js'
@@ -75,7 +75,7 @@ export class DIGNode {
   private startTime = 0
   
   // Unified intelligent subsystems
-  private peerDiscovery!: UnifiedPeerDiscovery
+  private peerDiscovery!: DIGOnlyPeerDiscovery
   private turnCoordination!: UnifiedTurnCoordination
   private peerCapabilities!: PeerConnectionCapabilities
   private natTraversal!: ComprehensiveNATTraversal
@@ -265,8 +265,8 @@ export class DIGNode {
     // Initialize zero-knowledge privacy
     this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
     
-    // Initialize unified subsystems
-    this.peerDiscovery = new UnifiedPeerDiscovery(this)
+    // Initialize DIG-only subsystems
+    this.peerDiscovery = new DIGOnlyPeerDiscovery(this)
     this.turnCoordination = new UnifiedTurnCoordination(this)
     this.peerCapabilities = new PeerConnectionCapabilities(this)
     this.natTraversal = new ComprehensiveNATTraversal(this)
@@ -289,7 +289,7 @@ export class DIGNode {
 
     // Start intelligent subsystems
     await this.safeServiceInit('UPnP Port Manager', () => this.upnpPortManager.initialize())
-    await this.safeServiceInit('Peer Discovery', () => this.peerDiscovery.start())
+    await this.safeServiceInit('DIG-Only Peer Discovery', () => this.peerDiscovery.start())
     await this.safeServiceInit('TURN Coordination', () => this.turnCoordination.start())
     await this.safeServiceInit('Connection Capabilities', () => this.peerCapabilities.initialize())
     await this.safeServiceInit('Download Orchestrator', () => this.downloadOrchestrator.initialize())
@@ -536,8 +536,7 @@ export class DIGNode {
         const peerId = event.detail?.toString()
         if (peerId) {
           this.logger.info(`👋 Disconnected from peer: ${peerId}`)
-          // Clean up security isolation for disconnected peer
-          this.peerDiscovery?.securityIsolation?.handlePeerDisconnection(peerId)
+          // Note: DIG-only discovery automatically handles peer cleanup
         }
       } catch (error) {
         this.logger.debug('Peer disconnect event error:', error)
