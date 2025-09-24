@@ -55,6 +55,7 @@ import { UnifiedTurnCoordination } from './UnifiedTurnCoordination.js'
 import { PeerConnectionCapabilities } from './PeerConnectionCapabilities.js'
 import { ComprehensiveNATTraversal } from './ComprehensiveNATTraversal.js'
 import { IntelligentDownloadOrchestrator } from './IntelligentDownloadOrchestrator.js'
+import { UPnPPortManager } from './UPnPPortManager.js'
 import { WebSocketRelay } from './WebSocketRelay.js'
 import { E2EEncryption } from './E2EEncryption.js'
 import { ZeroKnowledgePrivacy } from './ZeroKnowledgePrivacy.js'
@@ -77,6 +78,7 @@ export class DIGNode {
   private peerCapabilities!: PeerConnectionCapabilities
   private natTraversal!: ComprehensiveNATTraversal
   private downloadOrchestrator!: IntelligentDownloadOrchestrator
+  private upnpPortManager!: UPnPPortManager
   private webSocketRelay!: WebSocketRelay
   private e2eEncryption = new E2EEncryption()
   private zkPrivacy!: ZeroKnowledgePrivacy
@@ -266,6 +268,7 @@ export class DIGNode {
     this.peerCapabilities = new PeerConnectionCapabilities(this)
     this.natTraversal = new ComprehensiveNATTraversal(this)
     this.downloadOrchestrator = new IntelligentDownloadOrchestrator(this)
+    this.upnpPortManager = new UPnPPortManager(this)
     this.downloadManager = new DownloadManager(this.digPath, this)
     
     this.logger.info('✅ Intelligent subsystems initialized')
@@ -282,6 +285,7 @@ export class DIGNode {
     }
 
     // Start intelligent subsystems
+    await this.safeServiceInit('UPnP Port Manager', () => this.upnpPortManager.initialize())
     await this.safeServiceInit('Peer Discovery', () => this.peerDiscovery.start())
     await this.safeServiceInit('TURN Coordination', () => this.turnCoordination.start())
     await this.safeServiceInit('Connection Capabilities', () => this.peerCapabilities.initialize())
@@ -832,7 +836,9 @@ export class DIGNode {
       peerCount: peers.length,
       digPeers: digPeers.length,
       turnServers: this.turnCoordination?.getTurnStats()?.totalTurnServers || 0,
-      connectionCapabilities: this.peerCapabilities?.getCapabilityStats()
+      connectionCapabilities: this.peerCapabilities?.getCapabilityStats(),
+      upnpStatus: this.upnpPortManager?.getUPnPStatus(),
+      externalAddresses: this.upnpPortManager?.getExternalAddresses() || []
     }
   }
 
@@ -869,6 +875,7 @@ export class DIGNode {
     try {
       await this.peerDiscovery?.stop()
       await this.turnCoordination?.stop()
+      await this.upnpPortManager?.cleanup()
       await this.webSocketRelay?.disconnect()
       
       if (this.watcher) {
