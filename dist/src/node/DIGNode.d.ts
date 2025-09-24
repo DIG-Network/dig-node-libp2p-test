@@ -21,6 +21,7 @@ export declare class DIGNode {
     private logger;
     private startTime;
     private peerDiscovery;
+    private localNetworkDiscovery;
     private turnCoordination;
     private peerCapabilities;
     private natTraversal;
@@ -73,6 +74,7 @@ export declare class DIGNode {
     hasStore(storeId: string): boolean;
     findStorePeers(storeId: string): Promise<any[]>;
     connectToPeer(peerAddress: string): Promise<void>;
+    connectToLocalPeer(ipAddress: string, port?: number): Promise<boolean>;
     getConnectionInfo(): any;
     discoverAllPeers(): Promise<void>;
     forceConnectToPeers(): Promise<void>;

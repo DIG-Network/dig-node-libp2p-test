@@ -51,6 +51,7 @@ import {
 import { generateCryptoIPv6, parseURN, createCryptoIPv6Addresses, resolveCryptoIPv6, isCryptoIPv6Address } from './utils.js'
 import { Logger } from './logger.js'
 import { DIGOnlyPeerDiscovery } from './DIGOnlyPeerDiscovery.js'
+import { LocalNetworkDiscovery } from './LocalNetworkDiscovery.js'
 import { UnifiedTurnCoordination } from './UnifiedTurnCoordination.js'
 import { PeerConnectionCapabilities } from './PeerConnectionCapabilities.js'
 import { ComprehensiveNATTraversal } from './ComprehensiveNATTraversal.js'
@@ -76,6 +77,7 @@ export class DIGNode {
   
   // Unified intelligent subsystems
   private peerDiscovery!: DIGOnlyPeerDiscovery
+  private localNetworkDiscovery!: LocalNetworkDiscovery
   private turnCoordination!: UnifiedTurnCoordination
   private peerCapabilities!: PeerConnectionCapabilities
   private natTraversal!: ComprehensiveNATTraversal
@@ -282,6 +284,7 @@ export class DIGNode {
     
     // Initialize DIG-only subsystems
     this.peerDiscovery = new DIGOnlyPeerDiscovery(this)
+    this.localNetworkDiscovery = new LocalNetworkDiscovery(this)
     this.turnCoordination = new UnifiedTurnCoordination(this)
     this.peerCapabilities = new PeerConnectionCapabilities(this)
     this.natTraversal = new ComprehensiveNATTraversal(this)
@@ -304,6 +307,7 @@ export class DIGNode {
 
     // Start intelligent subsystems
     await this.safeServiceInit('UPnP Port Manager', () => this.upnpPortManager.initialize())
+    await this.safeServiceInit('Local Network Discovery', () => this.localNetworkDiscovery.start())
     await this.safeServiceInit('DIG-Only Peer Discovery', () => this.peerDiscovery.start())
     await this.safeServiceInit('TURN Coordination', () => this.turnCoordination.start())
     await this.safeServiceInit('Connection Capabilities', () => this.peerCapabilities.initialize())
@@ -842,9 +846,36 @@ export class DIGNode {
   }
 
   async connectToPeer(peerAddress: string): Promise<void> {
+    // Try local network discovery first for hotel networks
+    const isLocal = this.localNetworkDiscovery && await this.localNetworkDiscovery.manualConnectToPeer(peerAddress)
+    
+    if (isLocal) {
+      this.logger.info(`✅ Connected to local DIG peer: ${peerAddress}`)
+      return
+    }
+
+    // Fallback to direct connection
     const addr = multiaddr(peerAddress)
     await this.node.dial(addr)
     this.logger.info(`✅ Connected to peer: ${peerAddress}`)
+  }
+
+  // Manual connection for hotel networks (IP:PORT format)
+  async connectToLocalPeer(ipAddress: string, port: number = 4001): Promise<boolean> {
+    try {
+      this.logger.info(`🏠 Attempting local network connection: ${ipAddress}:${port}`)
+      
+      // Try local network discovery
+      if (this.localNetworkDiscovery) {
+        const peerAddress = `/ip4/${ipAddress}/tcp/${port}`
+        return await this.localNetworkDiscovery.manualConnectToPeer(peerAddress)
+      }
+      
+      return false
+    } catch (error) {
+      this.logger.error(`Local peer connection failed to ${ipAddress}:${port}:`, error)
+      return false
+    }
   }
 
   getConnectionInfo(): any {
@@ -859,7 +890,8 @@ export class DIGNode {
       turnServers: this.turnCoordination?.getTurnStats()?.totalTurnServers || 0,
       connectionCapabilities: this.peerCapabilities?.getCapabilityStats(),
       upnpStatus: this.upnpPortManager?.getUPnPStatus(),
-      externalAddresses: this.upnpPortManager?.getExternalAddresses() || []
+      externalAddresses: this.upnpPortManager?.getExternalAddresses() || [],
+      localNetworkStatus: this.localNetworkDiscovery?.getLocalNetworkStatus()
     }
   }
 
