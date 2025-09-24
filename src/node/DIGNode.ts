@@ -362,6 +362,15 @@ export class DIGNode {
             } else if (request.type === 'HANDSHAKE') {
               const handshakeResponse = await self.handleHandshake(request)
               yield uint8ArrayFromString(JSON.stringify(handshakeResponse))
+            } else if (request.type === 'DIG_NETWORK_IDENTIFICATION') {
+              const identResponse = self.handleDIGNetworkIdentification(request)
+              yield uint8ArrayFromString(JSON.stringify(identResponse))
+            } else if (request.type === 'VERIFY_DIG_MEMBERSHIP') {
+              const verifyResponse = self.handleDIGMembershipVerification(request)
+              yield uint8ArrayFromString(JSON.stringify(verifyResponse))
+            } else if (request.type === 'GET_PEER_INFO') {
+              const peerInfoResponse = self.handleGetPeerInfo(request)
+              yield uint8ArrayFromString(JSON.stringify(peerInfoResponse))
             }
             break
           }
@@ -510,6 +519,64 @@ export class DIGNode {
         error: `Handshake failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       }
     }
+  }
+
+  // Handle DIG network identification requests
+  private handleDIGNetworkIdentification(request: DIGRequest): DIGResponse {
+    this.logger.info(`🔍 DIG network identification request from peer`)
+    
+    return {
+      success: true,
+      networkId: 'dig-mainnet',
+      isDIGNode: true,
+      protocolVersion: '1.0.0',
+      timestamp: Date.now()
+    }
+  }
+
+  // Handle DIG membership verification requests
+  private handleDIGMembershipVerification(request: DIGRequest): DIGResponse {
+    this.logger.info(`🔐 DIG membership verification request`)
+    
+    return {
+      success: true,
+      networkId: 'dig-mainnet',
+      cryptoIPv6: this.cryptoIPv6,
+      capabilities: this.nodeCapabilities,
+      stores: this.getAvailableStores(),
+      timestamp: Date.now()
+    }
+  }
+
+  // Handle get peer info requests
+  private handleGetPeerInfo(request: DIGRequest): DIGResponse {
+    this.logger.info(`📋 Peer info request: ${request.requestedInfo?.join(', ') || 'all'}`)
+    
+    const response: any = {
+      success: true,
+      peerId: this.node.peerId.toString(),
+      timestamp: Date.now()
+    }
+
+    const requestedInfo = request.requestedInfo || []
+    
+    if (requestedInfo.includes('stores') || requestedInfo.length === 0) {
+      response.stores = this.getAvailableStores()
+    }
+    
+    if (requestedInfo.includes('capabilities') || requestedInfo.length === 0) {
+      response.capabilities = this.nodeCapabilities
+    }
+    
+    if (requestedInfo.includes('cryptoIPv6') || requestedInfo.length === 0) {
+      response.cryptoIPv6 = this.cryptoIPv6
+    }
+    
+    if (requestedInfo.includes('nodeType') || requestedInfo.length === 0) {
+      response.nodeType = 'full'
+    }
+
+    return response
   }
 
   // Get connection capabilities response

@@ -46,6 +46,9 @@ export declare class DIGNode {
     private serveStore;
     private serveFileRange;
     private handleHandshake;
+    private handleDIGNetworkIdentification;
+    private handleDIGMembershipVerification;
+    private handleGetPeerInfo;
     private getConnectionCapabilitiesResponse;
     private startWebSocketRelay;
     private startPeerEventHandling;

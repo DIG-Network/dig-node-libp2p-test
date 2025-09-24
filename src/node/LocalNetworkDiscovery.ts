@@ -66,34 +66,52 @@ export class LocalNetworkDiscovery {
     }
   }
 
-  // Get our local IP address
+  // Get our local IP address (enhanced detection)
   private async getLocalIPAddress(): Promise<string | null> {
     try {
       const { networkInterfaces } = await import('os')
       const interfaces = networkInterfaces()
+      
+      const candidates: string[] = []
       
       for (const [name, addresses] of Object.entries(interfaces)) {
         if (!addresses) continue
         
         for (const addr of addresses) {
           // Look for IPv4 addresses that are not loopback
-          if (addr.family === 'IPv4' && !addr.internal) {
-            // Prefer private network addresses (local networks)
-            if (addr.address.startsWith('192.168.') || 
-                addr.address.startsWith('10.') || 
-                addr.address.startsWith('172.16.')) {
-              this.logger.debug(`🔍 Found local network IP: ${addr.address} (${name})`)
-              return addr.address
-            }
+          if (addr.family === 'IPv4' && !addr.internal && addr.address !== '127.0.0.1') {
+            this.logger.debug(`🔍 Found IP candidate: ${addr.address} (${name})`)
+            candidates.push(addr.address)
           }
         }
       }
 
-      this.logger.debug('No local network IP found')
+      // Prefer private network addresses (local networks)
+      for (const ip of candidates) {
+        if (ip.startsWith('192.168.') || 
+            ip.startsWith('10.') || 
+            ip.startsWith('172.16.') ||
+            ip.startsWith('172.17.') ||
+            ip.startsWith('172.18.') ||
+            ip.startsWith('172.19.') ||
+            ip.startsWith('172.2') ||
+            ip.startsWith('172.3')) {
+          this.logger.info(`🏠 Local network IP detected: ${ip}`)
+          return ip
+        }
+      }
+
+      // If no private IPs, use first available (might be public IP)
+      if (candidates.length > 0) {
+        this.logger.info(`🌐 Using IP address: ${candidates[0]} (no private network detected)`)
+        return candidates[0]
+      }
+
+      this.logger.warn('⚠️ No suitable IP address found for local discovery')
       return null
 
     } catch (error) {
-      this.logger.debug('Failed to get local IP:', error)
+      this.logger.error('Failed to get local IP:', error)
       return null
     }
   }

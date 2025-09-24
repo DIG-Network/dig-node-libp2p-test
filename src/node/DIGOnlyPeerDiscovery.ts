@@ -638,54 +638,120 @@ export class DIGOnlyPeerDiscovery {
     }
   }
 
-  // Filter existing connections to DIG peers only
+  // Filter existing connections to DIG peers only (immediate and continuous)
   private async filterExistingConnectionsToDIGPeers(): Promise<void> {
     try {
       const connectedPeers = this.digNode.node.getPeers()
-      this.logger.info(`🔍 Filtering ${connectedPeers.length} connected peers to DIG network only...`)
+      this.logger.info(`🔍 Testing ${connectedPeers.length} connected peers for DIG protocol support...`)
 
       let digPeerCount = 0
       let nonDigPeerCount = 0
 
-      for (const peer of connectedPeers) {
-        const peerId = peer.toString()
-        
-        // Skip public infrastructure peers (we need them for connectivity)
-        if (this.isPublicInfrastructurePeer(peerId)) {
-          this.logger.debug(`🌐 Keeping public infrastructure peer: ${peerId} (needed for connectivity)`)
-          continue
-        }
-
-        // Test if peer supports DIG protocol
-        const isDIGPeer = await this.testDIGProtocolSupport(peer)
-        
-        if (isDIGPeer) {
-          digPeerCount++
-          this.logger.info(`✅ Verified DIG peer: ${peerId}`)
+      // Test all connected peers immediately
+      const testPromises = connectedPeers.map(async (peer: any) => {
+        try {
+          const peerId = peer.toString()
           
-          // Get comprehensive DIG peer info
-          const digPeerInfo = await this.getDIGPeerInfo(peerId, peer)
-          if (digPeerInfo) {
-            this.digPeers.set(peerId, digPeerInfo)
+          // Skip public infrastructure peers (we need them for connectivity)
+          if (this.isPublicInfrastructurePeer(peerId)) {
+            this.logger.debug(`🌐 Keeping public infrastructure peer: ${peerId} (needed for connectivity)`)
+            return { isDIG: false, isInfrastructure: true }
           }
-        } else {
-          nonDigPeerCount++
-          this.logger.debug(`⏭️ Disconnecting from non-DIG peer: ${peerId}`)
+
+          // Test if peer supports DIG protocol
+          this.logger.debug(`🧪 Testing peer for DIG protocol: ${peerId}`)
+          const isDIGPeer = await this.testDIGProtocolSupport(peer)
           
-          // Disconnect from non-DIG peers to avoid noise
-          try {
-            await this.digNode.node.hangUp(peer)
-          } catch (error) {
-            // Silent failure - peer might already be disconnected
+          if (isDIGPeer) {
+            this.logger.info(`✅ FOUND DIG PEER: ${peerId}`)
+            
+            // Get comprehensive DIG peer info
+            const digPeerInfo = await this.getDIGPeerInfo(peerId, peer)
+            if (digPeerInfo) {
+              this.digPeers.set(peerId, digPeerInfo)
+              return { isDIG: true, peerInfo: digPeerInfo }
+            }
+          } else {
+            this.logger.debug(`❌ Not a DIG peer: ${peerId}`)
+            
+            // Don't disconnect immediately - they might help with connectivity
+            // Just mark as non-DIG
+            return { isDIG: false, isInfrastructure: false }
+          }
+        } catch (error) {
+          this.logger.debug(`Error testing peer ${peer.toString()}:`, error)
+          return { isDIG: false, isInfrastructure: false }
+        }
+      })
+
+      // Wait for all tests to complete
+      const results = await Promise.allSettled(testPromises)
+      
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          if (result.value.isDIG) {
+            digPeerCount++
+          } else if (!result.value.isInfrastructure) {
+            nonDigPeerCount++
           }
         }
       }
 
-      this.logger.info(`🎯 DIG network filtering complete: ${digPeerCount} DIG peers, ${nonDigPeerCount} non-DIG peers disconnected`)
+      this.logger.info(`🎯 DIG peer discovery results: ${digPeerCount} DIG peers found, ${nonDigPeerCount} non-DIG peers`)
+
+      // Set up continuous monitoring for new connections
+      this.setupContinuousPeerTesting()
 
     } catch (error) {
       this.logger.error('Failed to filter existing connections:', error)
     }
+  }
+
+  // Set up continuous peer testing for new connections
+  private setupContinuousPeerTesting(): void {
+    this.digNode.node.addEventListener('peer:connect', async (evt: any) => {
+      try {
+        const connection = evt.detail
+        const remotePeer = connection?.remotePeer
+        
+        if (!remotePeer) return
+        
+        const peerId = remotePeer.toString()
+        
+        // Skip public infrastructure
+        if (this.isPublicInfrastructurePeer(peerId)) {
+          return
+        }
+
+        // Test new peer immediately
+        this.logger.info(`🧪 Testing newly connected peer: ${peerId}`)
+        
+        setTimeout(async () => {
+          try {
+            const isDIGPeer = await this.testDIGProtocolSupport(connection)
+            
+            if (isDIGPeer) {
+              this.logger.info(`🎉 NEW DIG PEER FOUND: ${peerId}`)
+              
+              const digPeerInfo = await this.getDIGPeerInfo(peerId, connection)
+              if (digPeerInfo) {
+                this.digPeers.set(peerId, digPeerInfo)
+                this.logger.info(`📁 DIG peer has ${digPeerInfo.stores.length} stores available`)
+              }
+            } else {
+              this.logger.debug(`❌ New peer is not DIG: ${peerId}`)
+            }
+          } catch (error) {
+            this.logger.debug(`Error testing new peer ${peerId}:`, error)
+          }
+        }, 1000) // Test after 1 second to let connection stabilize
+
+      } catch (error) {
+        this.logger.debug('Error in continuous peer testing:', error)
+      }
+    })
+
+    this.logger.info('🔄 Continuous peer testing enabled for new connections')
   }
 
   // Test if peer supports DIG protocol (without exposing sensitive data)

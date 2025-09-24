@@ -74,7 +74,7 @@ export declare enum CapabilityCode {
     MESH_ROUTING = 10
 }
 export interface DIGRequest {
-    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES';
+    type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES' | 'GET_PEER_INFO';
     storeId?: string;
     filePath?: string;
     urn?: string;
@@ -122,6 +122,8 @@ export interface DIGResponse {
     isDIGNode?: boolean;
     capabilities?: any;
     cryptoIPv6?: string;
+    stores?: string[];
+    nodeType?: string;
 }
 export interface DIGPeer {
     peerId: string;
