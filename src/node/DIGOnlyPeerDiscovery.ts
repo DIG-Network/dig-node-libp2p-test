@@ -69,6 +69,9 @@ export class DIGOnlyPeerDiscovery {
       // 7. Filter existing connections to DIG peers only
       await this.filterExistingConnectionsToDIGPeers()
 
+      // 8. Set up immediate testing of ALL new peer connections
+      this.setupImmediatePeerTesting()
+
       this.logger.info('✅ DIG-only peer discovery started with aggressive public bootstrap search')
 
     } catch (error) {
@@ -615,6 +618,11 @@ export class DIGOnlyPeerDiscovery {
     setInterval(async () => {
       await this.aggressivelySearchForDIGPeers()
     }, 10 * 60000) // Every 10 minutes
+
+    // CRITICAL: Test all connected peers every 30 seconds for DIG protocol
+    setInterval(async () => {
+      await this.testAllConnectedPeersForDIG()
+    }, 30000) // Every 30 seconds - this should find your DIG peers!
   }
 
   // Discover DIG peers via DHT namespace (not random LibP2P peers)
@@ -704,6 +712,65 @@ export class DIGOnlyPeerDiscovery {
 
     } catch (error) {
       this.logger.error('Failed to filter existing connections:', error)
+    }
+  }
+
+  // Set up immediate testing of ALL peer connections (CRITICAL FIX)
+  private setupImmediatePeerTesting(): void {
+    this.logger.info('🧪 Setting up immediate DIG protocol testing for ALL peer connections...')
+    
+    // Test existing connections immediately
+    setTimeout(async () => {
+      await this.testAllConnectedPeersForDIG()
+    }, 2000)
+
+    // Test new connections immediately
+    this.setupContinuousPeerTesting()
+  }
+
+  // Test ALL currently connected peers for DIG protocol (IMMEDIATE)
+  private async testAllConnectedPeersForDIG(): Promise<void> {
+    try {
+      const connectedPeers = this.digNode.node.getPeers()
+      this.logger.info(`🧪 IMMEDIATELY testing ${connectedPeers.length} connected peers for DIG protocol...`)
+
+      let digPeerCount = 0
+
+      for (const peer of connectedPeers) {
+        try {
+          const peerId = peer.toString()
+          
+          // Skip public infrastructure
+          if (this.isPublicInfrastructurePeer(peerId)) {
+            continue
+          }
+
+          this.logger.info(`🔍 Testing peer: ${peerId}`)
+          
+          // Test for DIG protocol support
+          const isDIGPeer = await this.testDIGProtocolSupport(peer)
+          
+          if (isDIGPeer) {
+            this.logger.info(`🎉 FOUND DIG PEER: ${peerId}`)
+            
+            const digPeerInfo = await this.getDIGPeerInfo(peerId, peer)
+            if (digPeerInfo) {
+              this.digPeers.set(peerId, digPeerInfo)
+              this.logger.info(`📁 DIG peer ${peerId} has ${digPeerInfo.stores.length} stores`)
+              digPeerCount++
+            }
+          } else {
+            this.logger.debug(`❌ Not DIG peer: ${peerId}`)
+          }
+        } catch (error) {
+          this.logger.debug(`Error testing peer:`, error)
+        }
+      }
+
+      this.logger.info(`🎯 IMMEDIATE TEST RESULTS: ${digPeerCount} DIG peers found out of ${connectedPeers.length} total peers`)
+
+    } catch (error) {
+      this.logger.error('Failed to test all connected peers:', error)
     }
   }
 
