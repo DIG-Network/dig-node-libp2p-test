@@ -20,6 +20,17 @@ export class DIGOnlyPeerDiscovery {
   private discoveryInterval: NodeJS.Timeout | null = null
   private announceInterval: NodeJS.Timeout | null = null
 
+  // All available public LibP2P bootstrap servers (try them all!)
+  private readonly ALL_PUBLIC_BOOTSTRAP_SERVERS = [
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp9J6W3KmKx6qeGBZp9rKTdKNWqFk',
+    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+    '/ip4/104.131.131.82/udp/4001/quic/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+    '/ip4/147.75.77.187/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+    '/ip4/147.75.77.187/udp/4001/quic/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
+  ]
+
   // DIG Network specific topics (avoid general LibP2P noise)
   private readonly DIG_GOSSIP_TOPICS = {
     PEER_DISCOVERY: 'dig-network-peer-discovery-v1',
@@ -32,27 +43,33 @@ export class DIGOnlyPeerDiscovery {
     this.digNode = digNode
   }
 
-  // Start DIG-only peer discovery
+  // Start DIG-only peer discovery with aggressive public bootstrap search
   async start(): Promise<void> {
     try {
-      this.logger.info('🎯 Starting DIG-only peer discovery (filtering out non-DIG peers)...')
+      this.logger.info('🎯 Starting DIG-only peer discovery across ALL public bootstrap servers...')
 
-      // 1. Set up DIG network namespace in DHT
+      // 1. Connect to ALL public LibP2P bootstrap servers
+      await this.connectToAllPublicBootstrapServers()
+
+      // 2. Set up DIG network namespace in DHT
       await this.setupDIGNetworkDHT()
 
-      // 2. Subscribe to DIG-specific GossipSub topics only
+      // 3. Subscribe to DIG-specific GossipSub topics only
       await this.subscribeToDIGNetworkTopics()
 
-      // 3. Announce ourselves to DIG network namespace
+      // 4. Aggressively search for DIG peers across all bootstrap networks
+      await this.aggressivelySearchForDIGPeers()
+
+      // 5. Announce ourselves to DIG network namespace
       await this.announceToDIGNetworkNamespace()
 
-      // 4. Start periodic DIG peer discovery
+      // 6. Start periodic DIG peer discovery
       this.startDIGOnlyDiscovery()
 
-      // 5. Filter existing connections to DIG peers only
+      // 7. Filter existing connections to DIG peers only
       await this.filterExistingConnectionsToDIGPeers()
 
-      this.logger.info('✅ DIG-only peer discovery started')
+      this.logger.info('✅ DIG-only peer discovery started with aggressive public bootstrap search')
 
     } catch (error) {
       this.logger.error('Failed to start DIG-only discovery:', error)
@@ -274,6 +291,314 @@ export class DIGOnlyPeerDiscovery {
     }
   }
 
+  // Connect to ALL public LibP2P bootstrap servers
+  private async connectToAllPublicBootstrapServers(): Promise<void> {
+    this.logger.info('🌐 Connecting to ALL public LibP2P bootstrap servers for maximum DIG peer discovery...')
+    
+    let connectedCount = 0
+    const connectionPromises = []
+
+    for (const bootstrapAddr of this.ALL_PUBLIC_BOOTSTRAP_SERVERS) {
+      const connectionPromise = this.connectToSingleBootstrapServer(bootstrapAddr)
+      connectionPromises.push(connectionPromise)
+    }
+
+    // Connect to all servers in parallel
+    const results = await Promise.allSettled(connectionPromises)
+    
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i]
+      const addr = this.ALL_PUBLIC_BOOTSTRAP_SERVERS[i]
+      
+      if (result.status === 'fulfilled' && result.value) {
+        connectedCount++
+        this.logger.info(`✅ Connected to public bootstrap: ${addr}`)
+      } else {
+        this.logger.debug(`❌ Failed to connect to public bootstrap: ${addr}`)
+      }
+    }
+
+    this.logger.info(`📊 Connected to ${connectedCount}/${this.ALL_PUBLIC_BOOTSTRAP_SERVERS.length} public bootstrap servers`)
+    
+    if (connectedCount === 0) {
+      this.logger.warn('⚠️ Failed to connect to any public bootstrap servers - DIG peer discovery may be limited')
+    }
+  }
+
+  // Connect to single bootstrap server
+  private async connectToSingleBootstrapServer(bootstrapAddr: string): Promise<boolean> {
+    try {
+      const { multiaddr } = await import('@multiformats/multiaddr')
+      const addr = multiaddr(bootstrapAddr)
+      
+      const connection = await Promise.race([
+        this.digNode.node.dial(addr),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Bootstrap connection timeout')), 15000)
+        )
+      ])
+      
+      return !!connection
+    } catch (error) {
+      this.logger.debug(`Bootstrap connection failed for ${bootstrapAddr}:`, error)
+      return false
+    }
+  }
+
+  // Aggressively search for DIG peers across all connected networks
+  private async aggressivelySearchForDIGPeers(): Promise<void> {
+    this.logger.info('🔍 Aggressively searching for DIG peers across all public LibP2P networks...')
+
+    try {
+      // Wait for DHT to bootstrap
+      await new Promise(resolve => setTimeout(resolve, 5000))
+
+      // Search for DIG peers via multiple methods simultaneously
+      const searchPromises = [
+        this.searchDIGPeersViaDHT(),
+        this.searchDIGPeersViaConnectedPeers(),
+        this.searchDIGPeersViaRandomWalk()
+      ]
+
+      const results = await Promise.allSettled(searchPromises)
+      let totalFound = 0
+
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          totalFound += result.value || 0
+        }
+      }
+
+      this.logger.info(`🔍 Aggressive search complete: ${totalFound} potential DIG peers found`)
+
+    } catch (error) {
+      this.logger.debug('Aggressive DIG peer search failed:', error)
+    }
+  }
+
+  // Search for DIG peers via DHT
+  private async searchDIGPeersViaDHT(): Promise<number> {
+    try {
+      const dht = this.digNode.node.services.dht
+      if (!dht) return 0
+
+      this.logger.debug('🔑 Searching for DIG peers in DHT...')
+
+      let foundCount = 0
+
+      // Search DIG network namespace
+      const namespaceKey = new TextEncoder().encode(`/${this.digNetworkNamespace}/peers/`)
+      
+      try {
+        for await (const event of dht.get(namespaceKey)) {
+          if (event.name === 'VALUE') {
+            try {
+              const peerInfo = JSON.parse(new TextDecoder().decode(event.value))
+              if (peerInfo.networkId === 'dig-mainnet' && peerInfo.peerId !== this.digNode.node.peerId.toString()) {
+                await this.processFoundDIGPeer(peerInfo)
+                foundCount++
+              }
+            } catch (parseError) {
+              // Silent parse failure
+            }
+          }
+        }
+      } catch (dhtError) {
+        this.logger.debug('DHT search failed (expected during bootstrap):', dhtError)
+      }
+
+      // Also search for general DIG store announcements
+      try {
+        const storeKey = new TextEncoder().encode('/dig-store/')
+        for await (const event of dht.get(storeKey)) {
+          if (event.name === 'VALUE') {
+            try {
+              const storeInfo = JSON.parse(new TextDecoder().decode(event.value))
+              if (storeInfo.peerId && storeInfo.peerId !== this.digNode.node.peerId.toString()) {
+                // Found a peer with DIG stores - likely a DIG node
+                await this.investigatePotentialDIGPeer(storeInfo.peerId)
+                foundCount++
+              }
+            } catch (parseError) {
+              // Silent parse failure
+            }
+          }
+        }
+      } catch (storeSearchError) {
+        this.logger.debug('Store search failed:', storeSearchError)
+      }
+
+      this.logger.debug(`🔑 DHT search found ${foundCount} potential DIG peers`)
+      return foundCount
+
+    } catch (error) {
+      this.logger.debug('DHT DIG peer search failed:', error)
+      return 0
+    }
+  }
+
+  // Search for DIG peers among connected peers
+  private async searchDIGPeersViaConnectedPeers(): Promise<number> {
+    try {
+      const connectedPeers = this.digNode.node.getPeers()
+      this.logger.debug(`🔍 Testing ${connectedPeers.length} connected peers for DIG protocol support...`)
+
+      let foundCount = 0
+
+      for (const peer of connectedPeers) {
+        const peerId = peer.toString()
+        
+        // Skip public infrastructure
+        if (this.isPublicInfrastructurePeer(peerId)) {
+          continue
+        }
+
+        // Test for DIG protocol support
+        const isDIGPeer = await this.testDIGProtocolSupport(peer)
+        if (isDIGPeer) {
+          this.logger.info(`✅ Found DIG peer among connected peers: ${peerId}`)
+          
+          const digPeerInfo = await this.getDIGPeerInfo(peerId, peer)
+          if (digPeerInfo) {
+            this.digPeers.set(peerId, digPeerInfo)
+            foundCount++
+          }
+        }
+      }
+
+      this.logger.debug(`🔍 Connected peer search found ${foundCount} DIG peers`)
+      return foundCount
+
+    } catch (error) {
+      this.logger.debug('Connected peer DIG search failed:', error)
+      return 0
+    }
+  }
+
+  // Search for DIG peers via random walk through LibP2P network
+  private async searchDIGPeersViaRandomWalk(): Promise<number> {
+    try {
+      const dht = this.digNode.node.services.dht
+      if (!dht) return 0
+
+      this.logger.debug('🚶 Performing random walk to discover DIG peers...')
+
+      let foundCount = 0
+
+      // Use DHT random walk to discover peers
+      try {
+        const randomKey = new Uint8Array(32)
+        crypto.getRandomValues(randomKey)
+
+        // Get closest peers to random key (discovers network topology)
+        for await (const peer of dht.getClosestPeers(randomKey)) {
+          try {
+            const peerId = peer.toString()
+            
+            // Skip if we already know this peer or it's public infrastructure
+            if (this.digPeers.has(peerId) || this.isPublicInfrastructurePeer(peerId)) {
+              continue
+            }
+
+            // Try to connect and test for DIG protocol
+            const connection = await this.digNode.node.dial(peer)
+            if (connection) {
+              const isDIGPeer = await this.testDIGProtocolSupport(connection)
+              if (isDIGPeer) {
+                this.logger.info(`✅ Found DIG peer via random walk: ${peerId}`)
+                
+                const digPeerInfo = await this.getDIGPeerInfo(peerId, connection)
+                if (digPeerInfo) {
+                  this.digPeers.set(peerId, digPeerInfo)
+                  foundCount++
+                }
+              } else {
+                // Disconnect from non-DIG peer to avoid noise
+                await this.digNode.node.hangUp(peer)
+              }
+            }
+
+            // Limit random walk to avoid overwhelming the network
+            if (foundCount >= 5) break
+
+          } catch (error) {
+            // Silent failure for random walk
+          }
+        }
+      } catch (walkError) {
+        this.logger.debug('Random walk failed:', walkError)
+      }
+
+      this.logger.debug(`🚶 Random walk found ${foundCount} DIG peers`)
+      return foundCount
+
+    } catch (error) {
+      this.logger.debug('Random walk DIG peer search failed:', error)
+      return 0
+    }
+  }
+
+  // Process found DIG peer from DHT
+  private async processFoundDIGPeer(peerInfo: any): Promise<void> {
+    try {
+      const { peerId, cryptoIPv6, stores, capabilities, addresses } = peerInfo
+      
+      if (peerId === this.digNode.node.peerId.toString()) {
+        return // Skip ourselves
+      }
+
+      // Add to DIG peer registry
+      this.digPeers.set(peerId, {
+        peerId,
+        cryptoIPv6: cryptoIPv6 || `fd00:${peerId.slice(0, 32)}`,
+        stores: stores || [],
+        capabilities: capabilities || {},
+        addresses: addresses || [],
+        lastSeen: peerInfo.timestamp || Date.now(),
+        discoveredVia: 'dht-namespace',
+        verified: true
+      })
+
+      this.logger.info(`📡 Found DIG peer in DHT: ${peerId} (${stores?.length || 0} stores)`)
+
+      // Try to connect to this DIG peer
+      if (addresses && addresses.length > 0) {
+        await this.connectToDIGPeer(peerId, addresses)
+      }
+
+    } catch (error) {
+      this.logger.debug('Failed to process found DIG peer:', error)
+    }
+  }
+
+  // Investigate potential DIG peer
+  private async investigatePotentialDIGPeer(peerId: string): Promise<void> {
+    try {
+      if (peerId === this.digNode.node.peerId.toString()) {
+        return // Skip ourselves
+      }
+
+      // Try to find this peer in connected peers
+      const connectedPeer = this.digNode.node.getPeers().find((p: any) => p.toString() === peerId)
+      
+      if (connectedPeer) {
+        // Test if it's a DIG peer
+        const isDIGPeer = await this.testDIGProtocolSupport(connectedPeer)
+        if (isDIGPeer) {
+          this.logger.info(`✅ Confirmed DIG peer via store investigation: ${peerId}`)
+          
+          const digPeerInfo = await this.getDIGPeerInfo(peerId, connectedPeer)
+          if (digPeerInfo) {
+            this.digPeers.set(peerId, digPeerInfo)
+          }
+        }
+      }
+
+    } catch (error) {
+      this.logger.debug(`Failed to investigate potential DIG peer ${peerId}:`, error)
+    }
+  }
+
   // Start DIG-only discovery (no random LibP2P peers)
   private startDIGOnlyDiscovery(): void {
     // Periodic DIG peer discovery via DHT namespace
@@ -285,6 +610,11 @@ export class DIGOnlyPeerDiscovery {
     this.announceInterval = setInterval(async () => {
       await this.announceToDIGNetworkNamespace()
     }, 5 * 60000) // Every 5 minutes
+
+    // Periodic aggressive search (less frequent)
+    setInterval(async () => {
+      await this.aggressivelySearchForDIGPeers()
+    }, 10 * 60000) // Every 10 minutes
   }
 
   // Discover DIG peers via DHT namespace (not random LibP2P peers)

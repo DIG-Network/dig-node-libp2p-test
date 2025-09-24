@@ -225,11 +225,26 @@ export class DIGNode {
       this.logger.warn('⚠️ Circuit Relay disabled:', error)
     }
 
-    // Peer discovery configuration
+    // Peer discovery configuration - use public LibP2P bootstrap servers
     const peerDiscovery = []
+    
+    // Always use public LibP2P bootstrap servers for global connectivity
+    const publicBootstrapServers = [
+      '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+      '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+      '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+      '/ip4/147.75.77.187/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
+    ]
+    
+    peerDiscovery.push(bootstrap({ list: publicBootstrapServers }))
+    this.logger.info(`🌐 Using ${publicBootstrapServers.length} public LibP2P bootstrap servers`)
+    
+    // Add custom DIG bootstrap servers if provided
     if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
       peerDiscovery.push(bootstrap({ list: this.config.bootstrapPeers }))
+      this.logger.info(`🎯 Also using ${this.config.bootstrapPeers.length} custom DIG bootstrap servers`)
     }
+    
     if (this.config.enableMdns !== false && !isAWS) {
       peerDiscovery.push(mdns())
       this.nodeCapabilities.mdns = true
@@ -294,9 +309,13 @@ export class DIGNode {
     await this.safeServiceInit('Connection Capabilities', () => this.peerCapabilities.initialize())
     await this.safeServiceInit('Download Orchestrator', () => this.downloadOrchestrator.initialize())
 
-    // Start WebSocket relay for bootstrap communication
+    // Start WebSocket relay only if custom discovery servers are configured
+    // (Public bootstrap doesn't need WebSocket relay)
     if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
       await this.safeServiceInit('WebSocket Relay', () => this.startWebSocketRelay())
+      this.logger.info('🔄 Using custom discovery servers with WebSocket relay')
+    } else {
+      this.logger.info('🌐 Using public LibP2P bootstrap only (no WebSocket relay needed)')
     }
 
     // Resume incomplete downloads

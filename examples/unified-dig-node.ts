@@ -18,11 +18,10 @@ async function main() {
     port: parseInt(process.env.DIG_PORT || '4001'),
     digPath: process.env.DIG_PATH || (process.env.NODE_ENV === 'production' ? '/app/dig' : undefined),
     
-    // Bootstrap from DIG network (AWS EBS instance + other DIG nodes)
+    // Use public LibP2P bootstrap only (no AWS dependency)
+    // DIG-only discovery will find DIG peers through public infrastructure
     discoveryServers: process.env.DIG_BOOTSTRAP_NODES ? 
-      process.env.DIG_BOOTSTRAP_NODES.split(',') : [
-        'http://dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com'
-      ],
+      process.env.DIG_BOOTSTRAP_NODES.split(',') : [],
     
     // Enable all capabilities
     enableMdns: true,
