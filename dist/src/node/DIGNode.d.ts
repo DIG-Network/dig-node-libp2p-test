@@ -26,6 +26,8 @@ export declare class DIGNode {
     private natTraversal;
     private downloadOrchestrator;
     private upnpPortManager;
+    private publicTurnFallback;
+    private portManager;
     private webSocketRelay;
     private e2eEncryption;
     private zkPrivacy;

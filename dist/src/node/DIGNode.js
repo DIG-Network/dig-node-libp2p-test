@@ -41,6 +41,8 @@ import { PeerConnectionCapabilities } from './PeerConnectionCapabilities.js';
 import { ComprehensiveNATTraversal } from './ComprehensiveNATTraversal.js';
 import { IntelligentDownloadOrchestrator } from './IntelligentDownloadOrchestrator.js';
 import { UPnPPortManager } from './UPnPPortManager.js';
+import { PublicTurnServerFallback } from './PublicTurnServerFallback.js';
+import { PortManager } from './PortManager.js';
 import { WebSocketRelay } from './WebSocketRelay.js';
 import { E2EEncryption } from './E2EEncryption.js';
 import { ZeroKnowledgePrivacy } from './ZeroKnowledgePrivacy.js';
@@ -53,6 +55,7 @@ export class DIGNode {
         this.isStarted = false;
         this.logger = new Logger('DIGNode');
         this.startTime = 0;
+        this.portManager = new PortManager();
         this.e2eEncryption = new E2EEncryption();
         // Node state
         this.nodeCapabilities = {
@@ -114,12 +117,10 @@ export class DIGNode {
     // Initialize LibP2P with comprehensive NAT traversal support
     async initializeLibP2PWithNATTraversal() {
         const isAWS = process.env.AWS_DEPLOYMENT === 'true';
-        // Address configuration
-        const addresses = {
-            listen: isAWS ?
-                [`/ip4/0.0.0.0/tcp/${this.config.port || 4001}`] :
-                [`/ip4/0.0.0.0/tcp/${this.config.port || 0}`, `/ip6/::/tcp/${this.config.port || 0}`]
-        };
+        // Use port manager to avoid conflicts
+        const preferredPort = this.config.port || 4001;
+        const { addresses, mainPort, wsPort } = await this.portManager.generateLibP2PAddressConfig(preferredPort, isAWS);
+        this.logger.info(`🔧 Using ports: LibP2P=${mainPort}, WebSocket=${wsPort}`);
         // Essential services
         const services = {
             ping: ping(),
@@ -146,22 +147,20 @@ export class DIGNode {
                 this.logger.warn('⚠️ AutoNAT disabled:', error);
             }
         }
-        // Transport configuration with NAT traversal
+        // Initialize public TURN fallback
+        this.publicTurnFallback = new PublicTurnServerFallback(this);
+        // Transport configuration with NAT traversal and public TURN fallback
         const transports = [tcp(), webSockets({ filter: all })];
-        // Add WebRTC for NAT traversal (non-AWS only)
+        // Add WebRTC for NAT traversal with public TURN servers (non-AWS only)
         if (!isAWS) {
             try {
+                // Get public TURN servers for WebRTC ICE configuration
+                const publicTurnConfig = this.publicTurnFallback.getRecommendedIceConfiguration();
                 transports.push(webRTC({
-                    rtcConfiguration: {
-                        iceServers: [
-                            { urls: ['stun:stun.l.google.com:19302'] },
-                            { urls: ['stun:stun1.l.google.com:19302'] },
-                            { urls: ['stun:global.stun.twilio.com:3478'] }
-                        ]
-                    }
+                    rtcConfiguration: publicTurnConfig
                 }));
                 this.nodeCapabilities.webrtc = true;
-                this.logger.info('✅ WebRTC NAT traversal enabled');
+                this.logger.info('✅ WebRTC NAT traversal enabled with public TURN fallback');
             }
             catch (error) {
                 this.logger.warn('⚠️ WebRTC disabled:', error);
