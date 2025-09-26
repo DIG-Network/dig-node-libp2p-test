@@ -197,24 +197,23 @@ export class SimpleDIGNode {
     // Handle new peer connections
     this.node.addEventListener('peer:connect', async (event) => {
       const peerId = event.detail.toString()
-      console.log(`🤝 Connected to peer: ${peerId.substring(0, 20)}...`)
+      // Don't log regular LibP2P connections - only DIG peers matter
       
       // Test if this peer supports DIG protocol IMMEDIATELY
       setTimeout(async () => {
         await this.testPeerForDIG(peerId)
       }, 100) // Test almost immediately
-      
-      // Skip direct connection attempts for now - focus on DIG protocol testing
-      // setTimeout(async () => {
-      //   await this.ensureDirectConnection(peerId)
-      // }, 2000)
     })
 
     // Handle peer disconnections
     this.node.addEventListener('peer:disconnect', (event) => {
       const peerId = event.detail.toString()
-      console.log(`👋 Disconnected from peer: ${peerId.substring(0, 20)}...`)
-      this.digPeers.delete(peerId)
+      
+      // Only log if this was a DIG peer
+      if (this.digPeers.has(peerId)) {
+        console.log(`👋 DIG peer disconnected: ${peerId.substring(0, 20)}...`)
+        this.digPeers.delete(peerId)
+      }
     })
   }
 
@@ -249,7 +248,8 @@ export class SimpleDIGNode {
             lastSeen: Date.now()
           })
           
-          console.log(`🎯 DIG peer found: ${peerId.substring(0, 20)}... (${response.stores.length} stores)`)
+          console.log(`🎉 DIG PEER CONNECTED: ${peerId.substring(0, 20)}... (${response.stores.length} stores)`)
+          console.log(`📊 Total DIG peers: ${this.digPeers.size}`)
           
           // Start syncing missing stores
           await this.syncMissingStores(peerId, response.stores)
