@@ -103,7 +103,7 @@ export const configurations = {
 }
 
 // Start the example
-if (require.main === module) {
+if (import.meta.url === `file://${process.argv[1]}`) {
   startDIGNodeWithAWSFallback().catch(console.error)
 }
 

@@ -271,23 +271,16 @@ app.post('/register', (req: Request, res: Response) => {
   }
 })
 
-// Peer discovery endpoint
+// Peer discovery endpoint (read-only, no cleanup)
 app.get('/peers', (req: Request, res: Response) => {
   try {
     const includeStores = req.query.includeStores === 'true'
     const includeCapabilities = req.query.includeCapabilities === 'true'
     const now = Date.now()
     
-    // Clean up expired peers
-    for (const [id, peer] of registeredPeers.entries()) {
-      if (now - peer.lastSeen > PEER_TIMEOUT) {
-        registeredPeers.delete(id)
-        turnServers.delete(id)
-        console.log(`🧹 Cleaned up expired peer: ${id}`)
-      }
-    }
-
+    // Get active peers (don't modify the registry here)
     const activePeers = Array.from(registeredPeers.values())
+      .filter(peer => now - peer.lastSeen < PEER_TIMEOUT) // Filter but don't delete
       .map(peer => ({
         peerId: peer.peerId,
         addresses: peer.addresses,
@@ -304,11 +297,45 @@ app.get('/peers', (req: Request, res: Response) => {
     res.json({
       peers: activePeers,
       total: activePeers.length,
+      totalRegistered: registeredPeers.size, // Show total vs active
       timestamp: new Date().toISOString()
     })
   } catch (error) {
     console.error('Peers endpoint error:', error)
     res.status(500).json({ error: 'Failed to get peers' })
+  }
+})
+
+// Peer heartbeat endpoint to keep registration active
+app.post('/heartbeat', (req: Request, res: Response) => {
+  try {
+    const { peerId } = req.body
+    
+    if (!peerId) {
+      return res.status(400).json({ error: 'Missing required field: peerId' })
+    }
+
+    const peer = registeredPeers.get(peerId)
+    if (peer) {
+      // Update lastSeen timestamp
+      peer.lastSeen = Date.now()
+      console.log(`💓 Heartbeat received from peer: ${peerId}`)
+      
+      res.json({ 
+        success: true, 
+        peerId,
+        lastSeen: peer.lastSeen,
+        timestamp: new Date().toISOString()
+      })
+    } else {
+      res.status(404).json({ 
+        error: 'Peer not found - please register first',
+        suggestion: 'Use POST /register to register this peer'
+      })
+    }
+  } catch (error) {
+    console.error('Heartbeat error:', error)
+    res.status(500).json({ error: 'Heartbeat failed' })
   }
 })
 
@@ -1163,78 +1190,33 @@ io.on('connection', (socket: Socket) => {
   })
 })
 
-// Cleanup stale peers periodically
-// Periodic cleanup and connection testing
+// Cleanup stale peers periodically (timeout-based only - peers must ping us to stay alive)
 setInterval(async () => {
   const now = Date.now()
   let cleanedCount = 0
-  let testedCount = 0
   
-  console.log(`🔍 Testing connections to ${registeredPeers.size} registered peers...`)
+  console.log(`🔍 Checking ${registeredPeers.size} registered peers for heartbeat timeout...`)
   
   for (const [peerId, peer] of registeredPeers) {
-    // Test if peer is still reachable
-    const isReachable = await testPeerConnection(peer)
-    testedCount++
-    
-    if (!isReachable || now - peer.lastSeen > PEER_TIMEOUT) {
+    // Only remove peers that haven't sent heartbeat for the full timeout period
+    if (now - peer.lastSeen > PEER_TIMEOUT) {
       registeredPeers.delete(peerId)
       turnServers.delete(peerId)
       cleanedCount++
-      console.log(`🧹 Removed unreachable peer: ${peerId}`)
-    } else {
-      console.log(`✅ Peer ${peerId} is reachable`)
+      console.log(`🧹 Removed expired peer: ${peerId} (no heartbeat for ${Math.round((now - peer.lastSeen) / 60000)} minutes)`)
     }
   }
   
-  console.log(`🔍 Connection test complete: ${testedCount} tested, ${cleanedCount} removed, ${registeredPeers.size} active`)
-}, 2 * 60 * 1000) // Every 2 minutes
-
-// Test if a peer is still reachable
-async function testPeerConnection(peer: RegisteredPeer): Promise<boolean> {
-  try {
-    // Check if peer is connected via WebSocket
-    const socket = Array.from(io.sockets.sockets.values())
-      .find(s => (s as ExtendedSocket).peerId === peer.peerId)
-    
-    if (socket && (socket as any).connected) {
-      console.log(`✅ Peer ${peer.peerId} connected via WebSocket`)
-      return true
-    }
-
-    // Test HTTP connectivity to peer's real addresses
-    if (peer.realAddresses && peer.realAddresses.length > 0) {
-      for (const address of peer.realAddresses) {
-        try {
-          // Extract IP and port from multiaddr
-          const match = address.match(/\/ip4\/([^\/]+)\/tcp\/(\d+)/)
-          if (match) {
-            const [, ip, port] = match
-            
-            // Simple HTTP ping to peer's bootstrap server
-            const response = await fetch(`http://${ip}:${parseInt(port) + 1000}/health`, {
-              signal: AbortSignal.timeout(5000)
-            })
-            
-            if (response.ok) {
-              console.log(`✅ Peer ${peer.peerId} reachable via HTTP at ${ip}:${port}`)
-              return true
-            }
-          }
-        } catch (error) {
-          // Silent failure - try next address
-        }
-      }
-    }
-
-    console.log(`⚠️ Peer ${peer.peerId} not reachable via WebSocket or HTTP`)
-    return false
-
-  } catch (error) {
-    console.log(`❌ Connection test failed for ${peer.peerId}:`, error)
-    return false
+  if (cleanedCount > 0) {
+    console.log(`🔍 Cleanup complete: ${cleanedCount} expired peers removed, ${registeredPeers.size} active`)
+    console.log(`💡 Reminder: Peers must send heartbeat via POST /heartbeat every ${PEER_TIMEOUT / 60000} minutes`)
+  } else {
+    console.log(`🔍 All ${registeredPeers.size} peers sending heartbeats regularly`)
   }
-}
+}, 5 * 60 * 1000) // Every 5 minutes
+
+// Note: Peer reachability is now determined by heartbeat messages, not connection testing
+// This is more reliable for NAT-ed peers that can't accept incoming connections
 
 // Signal peer to connect to TURN server for on-demand transfer
 app.post('/signal-turn-connection', (req: Request, res: Response) => {

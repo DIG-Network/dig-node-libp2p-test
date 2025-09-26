@@ -364,14 +364,14 @@ export class DIGNode {
           await this.discoverPeersFromAWSBootstrap()
         }
 
-        // 3. Set up periodic re-registration (every 5 minutes)
+        // 3. Set up periodic heartbeat to keep registration active (every 2 minutes)
         setInterval(async () => {
           try {
-            await this.useAWSBootstrapFallback()
+            await this.sendAWSBootstrapHeartbeat()
           } catch (error) {
-            this.logger.debug('Periodic AWS bootstrap registration failed:', error)
+            this.logger.debug('AWS bootstrap heartbeat failed:', error)
           }
-        }, 5 * 60 * 1000)
+        }, 2 * 60 * 1000) // Every 2 minutes to stay well within 10-minute timeout
 
         this.logger.info('✅ AWS bootstrap fallback configured successfully')
       } else {
@@ -1429,6 +1429,42 @@ export class DIGNode {
 
     } catch (error) {
       this.logger.warn('AWS bootstrap fallback failed:', error)
+      return false
+    }
+  }
+
+  // Send heartbeat to AWS bootstrap server to keep registration active
+  async sendAWSBootstrapHeartbeat(): Promise<boolean> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        return false
+      }
+
+      const response = await fetch(`${awsConfig.url}/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          peerId: this.node.peerId.toString()
+        })
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        this.logger.debug(`💓 AWS bootstrap heartbeat sent successfully`)
+        return true
+      } else if (response.status === 404) {
+        // Peer not found - need to re-register
+        this.logger.info('🔄 Peer not found in AWS bootstrap - re-registering...')
+        return await this.useAWSBootstrapFallback()
+      } else {
+        this.logger.warn(`⚠️ AWS bootstrap heartbeat failed: ${response.status}`)
+        return false
+      }
+
+    } catch (error) {
+      this.logger.debug('AWS bootstrap heartbeat failed:', error)
       return false
     }
   }
