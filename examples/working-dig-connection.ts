@@ -40,8 +40,8 @@ async function workingDIGConnection() {
     const { multiaddr } = await import('@multiformats/multiaddr')
     
     // Get localhost addresses
-    const node1LocalAddr = status1.listeningAddresses.find(addr => addr.includes('127.0.0.1'))
-    const node2LocalAddr = status2.listeningAddresses.find(addr => addr.includes('127.0.0.1'))
+    const node1LocalAddr = status1.listeningAddresses.find((addr: string) => addr.includes('127.0.0.1'))
+    const node2LocalAddr = status2.listeningAddresses.find((addr: string) => addr.includes('127.0.0.1'))
 
     if (node1LocalAddr && node2LocalAddr) {
       console.log(`🎯 Node1 connecting to Node2: ${node2LocalAddr}`)

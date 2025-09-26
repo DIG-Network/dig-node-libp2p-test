@@ -36,7 +36,7 @@ async function directConnectionTest() {
 
     // Force direct connection - Node 1 connects to Node 2
     console.log('\n🔗 Forcing direct connection: Node 1 → Node 2')
-    const node2Address = status2.listeningAddresses.find(addr => addr.includes('127.0.0.1'))
+    const node2Address = status2.listeningAddresses.find((addr: string) => addr.includes('127.0.0.1'))
     
     if (node2Address) {
       console.log(`🎯 Connecting to: ${node2Address}`)

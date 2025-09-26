@@ -52,8 +52,12 @@ export class SimpleDIGNode {
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
   // Direct IP bootstrap server (more reliable than DNS)
-  // Bootstrap servers - can be empty for local-only connections
-  private readonly BOOTSTRAP_SERVERS: string[] = []
+  // Bootstrap servers for peer discovery
+  private readonly BOOTSTRAP_SERVERS: string[] = [
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ'
+  ]
   
   // DIG Network gossip topic for peer announcements
   private readonly DIG_GOSSIP_TOPIC = 'dig-network-simple-v1'
@@ -81,12 +85,24 @@ export class SimpleDIGNode {
         connectionEncrypters: [noise()],
         streamMuxers: [yamux()],
         peerDiscovery: [
-          mdns() // Local network discovery only - no external bootstrap
+          bootstrap({
+            list: this.BOOTSTRAP_SERVERS,
+            timeout: 10000,
+            tagName: 'bootstrap'
+          }),
+          mdns({
+            interval: 5000, // More frequent mDNS announcements
+            serviceTag: 'dig-network' // Specific service tag for DIG nodes
+          }) // Local network discovery for same-network nodes
         ],
         services: {
           ping: ping(),
           identify: identify(),
-          dht: kadDHT({ clientMode: false }), // Enable DHT for peer discovery
+          dht: kadDHT({ 
+            clientMode: false,
+            validators: {},
+            selectors: {}
+          }), // Enable DHT for peer discovery
           gossipsub: gossipsub({ emitSelf: false }) // Enable gossip for DIG announcements
         },
         connectionManager: {
@@ -100,7 +116,7 @@ export class SimpleDIGNode {
 
       console.log(`✅ LibP2P node started: ${this.node.peerId.toString()}`)
       console.log(`📍 Listening on: ${this.node.getMultiaddrs().map(addr => addr.toString()).join(', ')}`)
-      console.log(`🔗 Bootstrap: Local network discovery only`)
+      console.log(`🔗 Bootstrap servers: ${this.BOOTSTRAP_SERVERS.length} configured`)
       
       // Monitor initial connection to bootstrap
       setTimeout(() => {
@@ -125,12 +141,21 @@ export class SimpleDIGNode {
 
       // Set up DIG network announcements for peer discovery
       setTimeout(async () => {
-        await this.setupDIGNetworkAnnouncements()
-        await this.searchForDIGPeersInDHT()
+        try {
+          await this.waitForServicesToStart()
+          await this.setupDIGNetworkAnnouncements()
+          await this.searchForDIGPeersInDHT()
+        } catch (servicesError) {
+          console.warn('⚠️ DHT/Gossip services failed, using direct peer testing only')
+        }
         
-        // Also test all currently connected peers for DIG protocol
+        // Always test all currently connected peers for DIG protocol
         await this.testAllConnectedPeersForDIG()
-      }, 15000) // Wait 15 seconds for LibP2P to stabilize
+        
+        // Set up periodic peer testing for new connections
+        this.startPeriodicPeerTesting()
+        
+      }, 30000) // Wait 30 seconds for LibP2P, DHT, and gossipsub to fully stabilize
 
       this.isStarted = true
       console.log('✅ Simple DIG Node started successfully')
@@ -178,6 +203,11 @@ export class SimpleDIGNode {
       setTimeout(async () => {
         await this.testPeerForDIG(peerId)
       }, 100) // Test almost immediately
+      
+      // Skip direct connection attempts for now - focus on DIG protocol testing
+      // setTimeout(async () => {
+      //   await this.ensureDirectConnection(peerId)
+      // }, 2000)
     })
 
     // Handle peer disconnections
@@ -454,19 +484,98 @@ export class SimpleDIGNode {
     return Array.from(this.digPeers.values())
   }
 
+  // Wait for DHT and Gossipsub services to be fully started
+  private async waitForServicesToStart(): Promise<void> {
+    console.log('⏱️ Waiting for LibP2P services to start properly...')
+    
+    // First, wait for basic LibP2P connectivity
+    let connectionAttempts = 0
+    while (connectionAttempts < 20) {
+      const peers = this.node.getPeers()
+      if (peers.length > 0) {
+        console.log(`✅ LibP2P connected to ${peers.length} peers`)
+        break
+      }
+      console.log(`⏱️ Waiting for LibP2P connections... (${connectionAttempts + 1}/20)`)
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      connectionAttempts++
+    }
+    
+    // Now wait for services to be ready
+    let serviceAttempts = 0
+    const maxServiceAttempts = 15
+    
+    while (serviceAttempts < maxServiceAttempts) {
+      const dht = this.node.services.dht as any
+      const gossipsub = this.node.services.gossipsub as any
+      
+      // Check if services exist and are started
+      const dhtExists = !!dht
+      const gossipExists = !!gossipsub
+      const dhtReady = dht && typeof dht.isStarted === 'function' ? dht.isStarted() : false
+      const gossipReady = gossipsub && typeof gossipsub.isStarted === 'function' ? gossipsub.isStarted() : false
+      
+      console.log(`🔍 Service status - DHT: exists=${dhtExists}, ready=${dhtReady} | Gossip: exists=${gossipExists}, ready=${gossipReady}`)
+      
+      if (dhtExists && gossipExists && dhtReady && gossipReady) {
+        console.log('✅ All services are ready!')
+        return
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      serviceAttempts++
+    }
+    
+    // If services still not ready, proceed without DHT/Gossip
+    console.warn('⚠️ DHT/Gossip services not ready - will use direct connections only')
+    throw new Error('Services failed to start properly')
+  }
+
+  // Start periodic peer testing to continuously look for DIG peers
+  private startPeriodicPeerTesting(): void {
+    console.log('🔄 Starting periodic peer testing for DIG protocol...')
+    
+    setInterval(async () => {
+      await this.testAllConnectedPeersForDIG()
+    }, 15000) // Test every 15 seconds
+  }
+
   // Test all currently connected peers for DIG protocol
   private async testAllConnectedPeersForDIG(): Promise<void> {
     try {
       const connectedPeers = this.node.getPeers()
-      console.log(`🔍 Testing ${connectedPeers.length} connected peers for DIG protocol...`)
-      
-      for (const peer of connectedPeers) {
-        const peerId = peer.toString()
-        await this.testPeerForDIG(peerId)
+      if (connectedPeers.length > 0) {
+        console.log(`🔍 Testing ${connectedPeers.length} connected peers for DIG protocol...`)
+        
+        for (const peer of connectedPeers) {
+          const peerId = peer.toString()
+          // Only test peers we haven't already identified as DIG peers
+          if (!this.digPeers.has(peerId)) {
+            await this.testPeerForDIG(peerId)
+          }
+        }
       }
       
     } catch (error) {
       console.error('Failed to test connected peers:', error)
+    }
+  }
+
+  // Ensure direct connection to a discovered peer
+  private async ensureDirectConnection(peerId: string): Promise<void> {
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id')
+      const peerIdObj = peerIdFromString(peerId)
+      const connections = this.node.getConnections(peerIdObj)
+      
+      if (connections.length === 0) {
+        // No direct connection, try to establish one using PeerId
+        console.log(`🔗 Ensuring direct connection to: ${peerId.substring(0, 20)}...`)
+        await this.node.dial(peerIdObj)
+        console.log(`✅ Direct connection established to: ${peerId.substring(0, 20)}...`)
+      }
+    } catch (error) {
+      console.debug(`Direct connection attempt failed for ${peerId.substring(0, 20)}...`, error)
     }
   }
 
@@ -501,22 +610,31 @@ export class SimpleDIGNode {
     try {
       console.log('📡 Setting up DIG network announcements...')
 
-      // Subscribe to DIG gossip topic
+      // Check if gossipsub service is available and started
       const gossipsub = this.node.services.gossipsub as any
-      if (gossipsub) {
-        await gossipsub.subscribe(this.DIG_GOSSIP_TOPIC)
-        
-        // Handle DIG peer announcements
-        gossipsub.addEventListener('message', (evt: any) => {
-          if (evt.detail.topic === this.DIG_GOSSIP_TOPIC) {
-            this.handleDIGGossipMessage(evt.detail.data)
-          }
-        })
+      if (gossipsub && gossipsub.isStarted && gossipsub.isStarted()) {
+        try {
+          await gossipsub.subscribe(this.DIG_GOSSIP_TOPIC)
+          
+          // Handle DIG peer announcements
+          gossipsub.addEventListener('message', (evt: any) => {
+            if (evt.detail.topic === this.DIG_GOSSIP_TOPIC) {
+              this.handleDIGGossipMessage(evt.detail.data)
+            }
+          })
 
-        // Announce ourselves via gossip
-        await this.announceDIGNodeViaGossip()
-        
-        console.log(`✅ Subscribed to DIG gossip topic: ${this.DIG_GOSSIP_TOPIC}`)
+          console.log(`✅ Subscribed to DIG gossip topic: ${this.DIG_GOSSIP_TOPIC}`)
+          
+          // Wait a bit for subscription to propagate, then announce
+          setTimeout(async () => {
+            await this.announceDIGNodeViaGossip()
+          }, 5000)
+          
+        } catch (subscribeError) {
+          console.debug('Gossip subscription failed:', subscribeError)
+        }
+      } else {
+        console.debug('Gossipsub service not ready yet')
       }
 
     } catch (error) {
@@ -538,15 +656,24 @@ export class SimpleDIGNode {
         timestamp: Date.now()
       }
 
-      await gossipsub.publish(
-        this.DIG_GOSSIP_TOPIC,
-        uint8ArrayFromString(JSON.stringify(announcement))
-      )
-
-      console.log(`📡 Announced DIG node via gossip (${this.digFiles.size} stores)`)
+      // Check if there are any peers subscribed to the topic
+      const peers = gossipsub.getSubscribers(this.DIG_GOSSIP_TOPIC)
+      if (peers && peers.length > 0) {
+        await gossipsub.publish(
+          this.DIG_GOSSIP_TOPIC,
+          uint8ArrayFromString(JSON.stringify(announcement))
+        )
+        console.log(`📡 Announced DIG node via gossip to ${peers.length} peers (${this.digFiles.size} stores)`)
+      } else {
+        console.debug(`📡 No peers subscribed to gossip topic yet, announcement queued`)
+        // Retry announcement later when peers might be available
+        setTimeout(() => this.announceDIGNodeViaGossip(), 30000)
+      }
 
     } catch (error) {
       console.debug('Gossip announcement failed:', error)
+      // Retry on failure
+      setTimeout(() => this.announceDIGNodeViaGossip(), 15000)
     }
   }
 
