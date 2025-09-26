@@ -88,6 +88,10 @@ export class UPnPPortManager {
       // 2. Open WebSocket port for NAT traversal (use next available port after main)
       const actualWsPort = await this.openPortWithConflictResolution(actualMainPort + 1, 'tcp', 'DIG-WebSocket-NAT')
 
+      // 3. Open HTTP download port for direct file access (CRITICAL FIX)
+      const httpPort = actualMainPort + 1000
+      await this.openPortWithConflictResolution(httpPort, 'tcp', 'DIG-HTTP-Download')
+
       // Update the DIG node's port configuration with actual allocated ports
       this.digNode.config.port = actualMainPort
       this.digNode.portManager?.allocatedPorts?.set('libp2p-main', actualMainPort)

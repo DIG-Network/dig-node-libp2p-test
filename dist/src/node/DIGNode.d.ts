@@ -8,6 +8,7 @@
  * - Comprehensive NAT traversal
  * - Intelligent download orchestration
  */
+import type { Stream } from '@libp2p/interface';
 import type { Libp2p } from 'libp2p';
 import { DIGNodeConfig, NodeCapabilities } from './types.js';
 export declare class DIGNode {
@@ -47,7 +48,7 @@ export declare class DIGNode {
     private handlePeerDiscovery;
     private identifyDIGNode;
     private performDIGHandshake;
-    private sendStreamMessage;
+    sendStreamMessage(stream: Stream, message: any): Promise<any>;
     private startCoreServices;
     private startHTTPDownloadServer;
     private safeServiceInit;

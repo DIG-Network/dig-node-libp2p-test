@@ -361,7 +361,13 @@ export class DIGNode {
          this.logger.info(`🔍 Discovering DIG peers from AWS bootstrap...`)
          await this.discoverPeersFromAWSBootstrap()
 
-         // 2.5. Trigger immediate store synchronization with discovered peers
+         // 2.5. Update registration with correct store count after stores are loaded
+         setTimeout(async () => {
+           this.logger.info('🔄 Updating AWS bootstrap registration with correct store count...')
+           await this.useAWSBootstrapFallback() // Re-register with loaded stores
+         }, 2000) // Wait 2 seconds for stores to load
+
+         // 2.6. Trigger immediate store synchronization with discovered peers
          setTimeout(async () => {
            await this.syncStoresFromBootstrapPeers()
          }, 5000) // Wait 5 seconds for connections to establish
@@ -592,7 +598,7 @@ export class DIGNode {
   }
 
   // Send message over stream and wait for response
-  private async sendStreamMessage(stream: Stream, message: any): Promise<any> {
+  async sendStreamMessage(stream: Stream, message: any): Promise<any> {
     try {
       const messageData = uint8ArrayFromString(JSON.stringify(message))
       
