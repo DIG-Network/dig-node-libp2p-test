@@ -318,22 +318,22 @@ export class DIGNode {
       // Set up peer connection handlers for DIG node identification
       this.setupDIGPeerIdentification()
 
-      // Initialize UPnP port manager
-    this.upnpPortManager = new UPnPPortManager(this)
-
-      // Initialize local network discovery
+      // Initialize all intelligent subsystems
+      this.upnpPortManager = new UPnPPortManager(this)
       this.localNetworkDiscovery = new LocalNetworkDiscovery(this)
+      this.peerDiscovery = new DIGOnlyPeerDiscovery(this)
+      this.turnCoordination = new UnifiedTurnCoordination(this)
+      this.peerCapabilities = new PeerConnectionCapabilities(this)
+      this.natTraversal = new ComprehensiveNATTraversal(this)
+      this.downloadOrchestrator = new IntelligentDownloadOrchestrator(this)
+      this.publicTurnFallback = new PublicTurnServerFallback(this)
+      this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
+      this.downloadManager = new DownloadManager(this.digPath, this)
 
-      // Initialize WebSocket relay for NAT traversal
+      // Initialize WebSocket relay for NAT traversal (if needed)
       if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
         this.webSocketRelay = new WebSocketRelay(this.config.discoveryServers[0], this.node.peerId.toString())
       }
-
-      // Initialize zero-knowledge privacy system
-      this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
-
-      // Initialize download manager
-    this.downloadManager = new DownloadManager(this.digPath, this)
     
     this.logger.info('✅ Intelligent subsystems initialized')
 

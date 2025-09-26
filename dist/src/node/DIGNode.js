@@ -35,7 +35,12 @@ import { homedir } from 'os';
 import { NodeType, CapabilityCode, DIG_PROTOCOL, DIG_DISCOVERY_PROTOCOL } from './types.js';
 import { generateCryptoIPv6 } from './utils.js';
 import { Logger } from './logger.js';
+import { DIGOnlyPeerDiscovery } from './DIGOnlyPeerDiscovery.js';
 import { LocalNetworkDiscovery } from './LocalNetworkDiscovery.js';
+import { UnifiedTurnCoordination } from './UnifiedTurnCoordination.js';
+import { PeerConnectionCapabilities } from './PeerConnectionCapabilities.js';
+import { ComprehensiveNATTraversal } from './ComprehensiveNATTraversal.js';
+import { IntelligentDownloadOrchestrator } from './IntelligentDownloadOrchestrator.js';
 import { UPnPPortManager } from './UPnPPortManager.js';
 import { PublicTurnServerFallback } from './PublicTurnServerFallback.js';
 import { PortManager } from './PortManager.js';
@@ -253,18 +258,21 @@ export class DIGNode {
             this.logger.info('🧠 Initializing intelligent subsystems...');
             // Set up peer connection handlers for DIG node identification
             this.setupDIGPeerIdentification();
-            // Initialize UPnP port manager
+            // Initialize all intelligent subsystems
             this.upnpPortManager = new UPnPPortManager(this);
-            // Initialize local network discovery
             this.localNetworkDiscovery = new LocalNetworkDiscovery(this);
-            // Initialize WebSocket relay for NAT traversal
+            this.peerDiscovery = new DIGOnlyPeerDiscovery(this);
+            this.turnCoordination = new UnifiedTurnCoordination(this);
+            this.peerCapabilities = new PeerConnectionCapabilities(this);
+            this.natTraversal = new ComprehensiveNATTraversal(this);
+            this.downloadOrchestrator = new IntelligentDownloadOrchestrator(this);
+            this.publicTurnFallback = new PublicTurnServerFallback(this);
+            this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString());
+            this.downloadManager = new DownloadManager(this.digPath, this);
+            // Initialize WebSocket relay for NAT traversal (if needed)
             if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
                 this.webSocketRelay = new WebSocketRelay(this.config.discoveryServers[0], this.node.peerId.toString());
             }
-            // Initialize zero-knowledge privacy system
-            this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString());
-            // Initialize download manager
-            this.downloadManager = new DownloadManager(this.digPath, this);
             this.logger.info('✅ Intelligent subsystems initialized');
             // Set up AWS bootstrap fallback (after a delay to let other systems start)
             setTimeout(async () => {
