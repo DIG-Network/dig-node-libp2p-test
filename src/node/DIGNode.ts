@@ -235,17 +235,23 @@ export class DIGNode {
     
     // Always use public LibP2P bootstrap servers for global connectivity
     try {
-      peerDiscovery.push(bootstrap({
-        list: [
-          // Public LibP2P bootstrap servers
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VBuFTjXPyBWWBGGvCVXVWb3DqhJ',
-          '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
-        ]
-      }))
+      const bootstrapList = [
+        // Public LibP2P bootstrap servers (primary)
+      '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+      '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VBuFTjXPyBWWBGGvCVXVWb3DqhJ',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
+    ]
+    
+    // Add custom DIG bootstrap servers if provided
+    if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
+        bootstrapList.push(...this.config.bootstrapPeers)
+        this.logger.info(`🎯 Added ${this.config.bootstrapPeers.length} custom DIG bootstrap servers`)
+      }
+
+      peerDiscovery.push(bootstrap({ list: bootstrapList }))
       this.nodeCapabilities.bootstrapServer = true
-      this.logger.info('✅ Public LibP2P bootstrap enabled')
+      this.logger.info(`✅ Bootstrap discovery enabled with ${bootstrapList.length} servers`)
     } catch (error) {
       this.logger.warn('⚠️ Bootstrap discovery disabled:', error)
     }
@@ -260,7 +266,7 @@ export class DIGNode {
           serviceTag: 'dig-network', // Custom service tag for DIG nodes
           peerName: `dig-node-${this.node?.peerId?.toString()?.slice(-8) || 'unknown'}`
         }))
-        this.nodeCapabilities.mdns = true
+      this.nodeCapabilities.mdns = true
         this.logger.info('✅ Enhanced mDNS local discovery enabled')
       } catch (error) {
         this.logger.warn('⚠️ mDNS discovery disabled:', error)
@@ -313,7 +319,7 @@ export class DIGNode {
       this.setupDIGPeerIdentification()
 
       // Initialize UPnP port manager
-      this.upnpPortManager = new UPnPPortManager(this)
+    this.upnpPortManager = new UPnPPortManager(this)
 
       // Initialize local network discovery
       this.localNetworkDiscovery = new LocalNetworkDiscovery(this)
@@ -327,13 +333,53 @@ export class DIGNode {
       this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
 
       // Initialize download manager
-      this.downloadManager = new DownloadManager(this.digPath, this)
+    this.downloadManager = new DownloadManager(this.digPath, this)
+    
+    this.logger.info('✅ Intelligent subsystems initialized')
 
-      this.logger.info('✅ Intelligent subsystems initialized')
+      // Set up AWS bootstrap fallback (after a delay to let other systems start)
+      setTimeout(async () => {
+        await this.setupAWSBootstrapFallback()
+      }, 10000) // 10 second delay
 
     } catch (error) {
       this.logger.error('Failed to initialize intelligent subsystems:', error)
       throw error
+    }
+  }
+
+  // Set up AWS bootstrap server as last resort fallback
+  private async setupAWSBootstrapFallback(): Promise<void> {
+    try {
+      this.logger.info('🌐 Setting up AWS bootstrap server as last resort fallback...')
+
+      // 1. Register with AWS bootstrap server
+      const registered = await this.useAWSBootstrapFallback()
+      
+      if (registered) {
+        // 2. Discover peers if we have low connectivity
+        const peerCount = this.node.getPeers().length
+        if (peerCount < 5) {
+          this.logger.info(`🔍 Low peer count (${peerCount}) - discovering peers from AWS bootstrap...`)
+          await this.discoverPeersFromAWSBootstrap()
+        }
+
+        // 3. Set up periodic re-registration (every 5 minutes)
+        setInterval(async () => {
+          try {
+            await this.useAWSBootstrapFallback()
+          } catch (error) {
+            this.logger.debug('Periodic AWS bootstrap registration failed:', error)
+          }
+        }, 5 * 60 * 1000)
+
+        this.logger.info('✅ AWS bootstrap fallback configured successfully')
+      } else {
+        this.logger.warn('⚠️ AWS bootstrap fallback not available')
+      }
+
+    } catch (error) {
+      this.logger.warn('Failed to setup AWS bootstrap fallback:', error)
     }
   }
 
@@ -1123,6 +1169,7 @@ export class DIGNode {
   // Download store using intelligent orchestrator
   async downloadStore(storeId: string): Promise<boolean> {
     try {
+      // Primary: Use intelligent download orchestrator
       const result = await this.downloadOrchestrator.downloadStore(storeId)
       
       if (result.success && result.data) {
@@ -1131,10 +1178,83 @@ export class DIGNode {
         return true
       }
       
+      // Fallback: Try AWS bootstrap TURN relay
+      this.logger.info(`🌐 Primary download failed for ${storeId} - trying AWS bootstrap TURN fallback...`)
+      const awsResult = await this.downloadViaAWSBootstrapTURN(storeId)
+      
+      if (awsResult) {
+        await this.saveDownloadedStore(storeId, awsResult)
+        this.logger.info(`✅ Downloaded ${storeId} via AWS bootstrap TURN fallback`)
+        return true
+      }
+      
       return false
     } catch (error) {
       this.logger.error(`Download failed for ${storeId}:`, error)
       return false
+    }
+  }
+
+  // Download via AWS bootstrap TURN relay as last resort
+  private async downloadViaAWSBootstrapTURN(storeId: string): Promise<Buffer | null> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        return null
+      }
+
+      // Find peers with this store from AWS bootstrap
+      const response = await fetch(`${awsConfig.url}/peers?includeStores=true`)
+      
+      if (!response.ok) {
+        return null
+      }
+
+      const result = await response.json()
+      const peersWithStore = result.peers?.filter((peer: any) => 
+        peer.stores?.includes(storeId) && peer.peerId !== this.node.peerId.toString()
+      ) || []
+
+      if (peersWithStore.length === 0) {
+        this.logger.warn(`⚠️ No peers found with store ${storeId} on AWS bootstrap`)
+        return null
+      }
+
+      const sourcePeer = peersWithStore[0]
+      this.logger.info(`📡 Attempting AWS bootstrap TURN relay from ${sourcePeer.peerId}`)
+
+      // Request relay via AWS bootstrap TURN
+      const relayResponse = await fetch(`${awsConfig.url}/relay-store`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeId,
+          fromPeerId: sourcePeer.peerId,
+          toPeerId: this.node.peerId.toString(),
+          userTier: process.env.DIG_USER_TIER || 'free',
+          isPremium: process.env.DIG_IS_PREMIUM === 'true'
+        })
+      })
+
+      if (relayResponse.ok) {
+        const relayResult = await relayResponse.json()
+        
+        if (relayResult.success) {
+          this.logger.info(`✅ AWS bootstrap TURN relay initiated: ${relayResult.method}`)
+          
+          // For now, return a placeholder - full implementation would handle the relay
+          // This would require WebSocket connection to the bootstrap server
+          this.logger.warn('⚠️ AWS bootstrap TURN relay requires WebSocket implementation')
+          return null
+        }
+      }
+
+      return null
+
+    } catch (error) {
+      this.logger.debug('AWS bootstrap TURN download failed:', error)
+      return null
     }
   }
 
@@ -1236,14 +1356,196 @@ export class DIGNode {
     if (this.nodeCapabilities.mdns) methods.push('mDNS')
     
     methods.push('TCP Direct')
+    methods.push('AWS Bootstrap Fallback')
     
     return methods
   }
 
+  // Get AWS bootstrap server configuration
+  private getAWSBootstrapConfig(): { url: string; enabled: boolean } {
+    const awsBootstrapUrl = process.env.DIG_AWS_BOOTSTRAP_URL || 
+                           'http://awseb--AWSEB-qNbAdipmcXyx-770761774.us-east-1.elb.amazonaws.com'
+    
+    return {
+      url: awsBootstrapUrl,
+      enabled: process.env.DIG_AWS_BOOTSTRAP_ENABLED !== 'false'
+    }
+  }
+
+  // Use AWS bootstrap server as last resort for peer discovery
+  async useAWSBootstrapFallback(): Promise<boolean> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        this.logger.debug('⏭️ AWS bootstrap fallback disabled')
+        return false
+      }
+
+      this.logger.info('🌐 Using AWS bootstrap server as fallback for peer discovery...')
+      
+      // Register with AWS bootstrap server
+      const registrationData = {
+        peerId: this.node.peerId.toString(),
+        addresses: this.node.getMultiaddrs().map(addr => addr.toString()),
+        cryptoIPv6: this.cryptoIPv6,
+        stores: Array.from(this.digFiles.keys()),
+        version: '1.0.0',
+        privacyMode: true,
+        capabilities: this.nodeCapabilities,
+        turnCapable: this.nodeCapabilities.turnServer,
+        bootstrapCapable: false,
+        networkId: 'mainnet',
+        softwareVersion: '1.0.0',
+        serverPort: this.config.port || 4001,
+        nodeType: 0, // FULL_NODE
+        capabilityList: [
+          [1, 'Store synchronization'],
+          [4, 'End-to-end encryption'],
+          [5, 'Byte-range downloads']
+        ],
+        zkProofSupported: true,
+        onionRoutingSupported: true,
+        timingObfuscationEnabled: true,
+        trafficMixingEnabled: true,
+        metadataScrambled: true
+      }
+
+      const response = await fetch(`${awsConfig.url}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(registrationData)
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        this.logger.info(`✅ Registered with AWS bootstrap server: ${result.totalPeers} total peers`)
+        return true
+      } else {
+        this.logger.warn(`⚠️ AWS bootstrap registration failed: ${response.status}`)
+        return false
+      }
+
+    } catch (error) {
+      this.logger.warn('AWS bootstrap fallback failed:', error)
+      return false
+    }
+  }
+
+  // Use AWS bootstrap server as TURN server fallback
+  async useAWSBootstrapTURNFallback(targetPeerId: string, storeId?: string): Promise<any> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        this.logger.debug('⏭️ AWS bootstrap TURN fallback disabled')
+        return null
+      }
+
+      this.logger.info('📡 Using AWS bootstrap server as TURN fallback...')
+
+      // Request TURN allocation from AWS bootstrap server
+      const turnRequest = {
+        peerId: this.node.peerId.toString(),
+        estimatedBandwidthMbps: 10, // Conservative estimate
+        userTier: process.env.DIG_USER_TIER || 'free',
+        isPremium: process.env.DIG_IS_PREMIUM === 'true',
+        p2pAttempted: true, // We're using this as fallback
+        storeId
+      }
+
+      const response = await fetch(`${awsConfig.url}/allocate-turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(turnRequest)
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        
+        if (result.success) {
+          this.logger.info(`✅ AWS bootstrap TURN allocated: ${result.sessionId} (${result.limits?.priorityLevel})`)
+          this.logger.info(`💰 Cost info: ${(result.costInfo?.currentCostRatio * 100).toFixed(1)}% budget used`)
+          
+          return {
+            type: 'aws-bootstrap-turn',
+            sessionId: result.sessionId,
+            url: awsConfig.url,
+            limits: result.limits,
+            costInfo: result.costInfo
+          }
+        } else {
+          this.logger.warn(`⚠️ AWS bootstrap TURN rejected: ${result.error}`)
+          if (result.retryAfter) {
+            this.logger.info(`🔄 Can retry in ${result.retryAfter} seconds`)
+          }
+          return null
+        }
+      } else {
+        this.logger.warn(`⚠️ AWS bootstrap TURN request failed: ${response.status}`)
+        return null
+      }
+
+    } catch (error) {
+      this.logger.warn('AWS bootstrap TURN fallback failed:', error)
+      return null
+    }
+  }
+
   async discoverAllPeers(): Promise<void> {
-    this.logger.info('🔍 Starting manual peer discovery...')
-    // Trigger peer discovery
+    this.logger.info('🔍 Starting comprehensive peer discovery...')
+    
+    // Primary: Use DIG-only peer discovery
     await this.peerDiscovery?.discoverDIGPeers?.()
+    
+    // Fallback: Use AWS bootstrap server if low peer count
+    const currentPeerCount = this.node.getPeers().length
+    if (currentPeerCount < 3) {
+      this.logger.info('🌐 Low peer count - attempting AWS bootstrap fallback...')
+      await this.useAWSBootstrapFallback()
+      
+      // Discover peers from AWS bootstrap server
+      await this.discoverPeersFromAWSBootstrap()
+    }
+  }
+
+  // Discover peers from AWS bootstrap server
+  private async discoverPeersFromAWSBootstrap(): Promise<void> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      const response = await fetch(`${awsConfig.url}/peers?includeStores=true&includeCapabilities=true`)
+      
+      if (response.ok) {
+        const result = await response.json()
+        const peers = result.peers || []
+        
+        this.logger.info(`🔍 Discovered ${peers.length} peers from AWS bootstrap server`)
+        
+        // Try to connect to DIG peers
+        for (const peer of peers.slice(0, 5)) { // Limit to 5 connections
+          if (peer.peerId !== this.node.peerId.toString() && peer.addresses?.length > 0) {
+            try {
+              // Try to connect using real addresses (if available)
+              const addresses = peer.realAddresses || peer.addresses
+              for (const address of addresses.slice(0, 2)) { // Try first 2 addresses
+                try {
+                  await this.node.dial(address)
+                  this.logger.info(`✅ Connected to AWS bootstrap peer: ${peer.peerId}`)
+                  break
+                } catch (dialError) {
+                  this.logger.debug(`Failed to dial ${address}:`, dialError)
+                }
+              }
+            } catch (error) {
+              this.logger.debug(`Failed to connect to peer ${peer.peerId}:`, error)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.warn('Failed to discover peers from AWS bootstrap:', error)
+    }
   }
 
   async forceConnectToPeers(): Promise<void> {

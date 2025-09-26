@@ -54,6 +54,9 @@ export class UnifiedTurnCoordination {
       // Check if we can act as TURN server
       await this.detectOwnTurnCapability()
 
+      // AWS bootstrap server fallback discovery
+      await this.discoverAWSBootstrapTurnServers()
+
       this.logger.info(`📊 TURN discovery complete: ${this.turnServers.size} servers available`)
 
     } catch (error) {
@@ -375,6 +378,60 @@ export class UnifiedTurnCoordination {
     this.activeConnections.clear()
     this.logger.info('🛑 TURN coordination stopped')
   }
+
+  // Discover AWS bootstrap server as TURN fallback
+  private async discoverAWSBootstrapTurnServers(): Promise<void> {
+    try {
+      const awsBootstrapUrl = process.env.DIG_AWS_BOOTSTRAP_URL || 
+                             'http://awseb--AWSEB-qNbAdipmcXyx-770761774.us-east-1.elb.amazonaws.com'
+      
+      if (process.env.DIG_AWS_BOOTSTRAP_ENABLED === 'false') {
+        this.logger.debug('⏭️ AWS bootstrap TURN discovery disabled')
+        return
+      }
+
+      this.logger.debug('🌐 Discovering AWS bootstrap server as TURN fallback...')
+
+      // Test AWS bootstrap server availability
+      const response = await fetch(`${awsBootstrapUrl}/health`, {
+        signal: AbortSignal.timeout(5000)
+      })
+
+      if (response.ok) {
+        const health = await response.json()
+        
+        // Add AWS bootstrap server as TURN fallback
+        const awsBootstrapTurn: TurnServerInfo = {
+          peerId: 'aws-bootstrap-server',
+          type: 'bootstrap',
+          url: awsBootstrapUrl,
+          addresses: [awsBootstrapUrl],
+          maxCapacity: 100, // High capacity for fallback
+          currentLoad: health.costInfo?.activeSessions || 0,
+          healthStatus: health.status === 'healthy' ? 'healthy' : 'unhealthy',
+          discoveredVia: 'manual',
+          lastSeen: Date.now(),
+          costInfo: health.costInfo
+        }
+
+        this.turnServers.set('aws-bootstrap-server', awsBootstrapTurn)
+        
+        const costMode = health.costInfo?.mode || 'unknown'
+        this.logger.info(`✅ AWS bootstrap TURN server discovered (${costMode} mode, ${health.costInfo?.budgetUsed || 'unknown'} budget used)`)
+        
+        // Log cost warning if in throttling mode
+        if (costMode === 'throttle' || costMode === 'emergency' || costMode === 'shutdown') {
+          this.logger.warn(`⚠️ AWS bootstrap in ${costMode} mode - limited availability`)
+        }
+
+      } else {
+        this.logger.warn(`⚠️ AWS bootstrap server not available: ${response.status}`)
+      }
+
+    } catch (error) {
+      this.logger.debug('AWS bootstrap TURN discovery failed:', error)
+    }
+  }
 }
 
 // Simplified TURN server information
@@ -389,4 +446,5 @@ interface TurnServerInfo {
   healthStatus: 'healthy' | 'unhealthy' | 'unknown'
   discoveredVia: 'dht' | 'gossip' | 'manual'
   lastSeen: number
+  costInfo?: any // AWS bootstrap cost information
 }

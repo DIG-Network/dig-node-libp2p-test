@@ -21,6 +21,20 @@ const { Server: SocketIOServer } = require('socket.io')
 
 import type { Request, Response } from 'express'
 import type { Socket } from 'socket.io'
+import { CostAwareTURNServer } from './CostAwareTURNServer.js'
+
+// Type definitions for requests
+interface TurnAllocationRequest {
+  peerId: string
+  sessionId?: string
+  estimatedBandwidthMbps: number
+  userTier?: string
+  isPremium?: boolean
+  p2pAttempted?: boolean
+  storeId?: string
+  rangeStart?: number
+  rangeEnd?: number
+}
 
 // Extend global type for pending bootstrap TURN requests
 declare global {
@@ -103,6 +117,9 @@ interface ExtendedSocket {
 const registeredPeers = new Map<string, RegisteredPeer>()
 const turnServers = new Map<string, RegisteredPeer>()
 
+// Cost-aware TURN server (full version with AWS cost monitoring)
+const costAwareTURN = new CostAwareTURNServer()
+
 // Express app
 const app = express()
 const httpServer = createServer(app)
@@ -126,10 +143,12 @@ const io = new SocketIOServer(httpServer, {
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
-// Health check endpoint
+// Health check endpoint with cost information
 app.get('/health', (req: Request, res: Response) => {
+  const costStats = costAwareTURN.getCostStatistics()
+  
   const health = {
-    status: 'healthy',
+    status: costStats.mode.shutdown ? 'degraded' : 'healthy',
     service: 'DIG Network Bootstrap Server',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
@@ -137,7 +156,14 @@ app.get('/health', (req: Request, res: Response) => {
     peers: registeredPeers.size,
     turnServers: turnServers.size,
     socketConnections: io.sockets.sockets.size,
-    environment: NODE_ENV
+    environment: NODE_ENV,
+    costInfo: {
+      budgetUsed: `${(costStats.costMetrics.costRatio * 100).toFixed(1)}%`,
+      projectedMonthlyCost: `$${costStats.costMetrics.projectedMonthlySpend.toFixed(2)}`,
+      budgetLimit: `$${costStats.costMetrics.budgetLimit.toFixed(2)}`,
+      mode: costStats.mode.currentThreshold,
+      activeSessions: costStats.sessionStats.total
+    }
   }
   res.json(health)
 })
@@ -350,8 +376,54 @@ app.get('/turn-servers', (req: Request, res: Response) => {
   }
 })
 
-// Store relay endpoint with byte-range support
-app.post('/relay-store', (req: Request, res: Response) => {
+// Cost-aware TURN allocation endpoint
+app.post('/allocate-turn', async (req: Request, res: Response) => {
+  try {
+    const request: TurnAllocationRequest = {
+      peerId: req.body.peerId,
+      sessionId: req.body.sessionId,
+      estimatedBandwidthMbps: req.body.estimatedBandwidthMbps || 10,
+      userTier: req.body.userTier || 'free',
+      isPremium: req.body.isPremium || false,
+      p2pAttempted: req.body.p2pAttempted || false,
+      storeId: req.body.storeId,
+      rangeStart: req.body.rangeStart,
+      rangeEnd: req.body.rangeEnd
+    }
+
+    if (!request.peerId) {
+      return res.status(400).json({ error: 'Missing required field: peerId' })
+    }
+
+    const response = await costAwareTURN.handleAllocationRequest(request)
+    
+    if (response.shutdown) {
+      res.status(503).json(response)
+    } else if (response.success) {
+      res.json(response)
+    } else {
+      res.status(429).json(response)
+    }
+
+  } catch (error) {
+    console.error('TURN allocation error:', error)
+    res.status(500).json({ error: 'TURN allocation failed' })
+  }
+})
+
+// Cost statistics endpoint
+app.get('/cost-stats', (req: Request, res: Response) => {
+  try {
+    const stats = costAwareTURN.getCostStatistics()
+    res.json(stats)
+  } catch (error) {
+    console.error('Cost stats error:', error)
+    res.status(500).json({ error: 'Failed to get cost statistics' })
+  }
+})
+
+// Store relay endpoint with cost-aware TURN allocation
+app.post('/relay-store', async (req: Request, res: Response) => {
   try {
     const { 
       storeId, 
@@ -361,17 +433,52 @@ app.post('/relay-store', (req: Request, res: Response) => {
       rangeStart,
       rangeEnd,
       chunkId,
-      totalSize
+      totalSize,
+      userTier,
+      isPremium
     } = req.body
     
     if (!storeId || !fromPeerId || !toPeerId) {
       return res.status(400).json({ error: 'Missing required fields: storeId, fromPeerId, toPeerId' })
     }
 
+    // Check if this should use cost-aware TURN allocation
     const isRangeRequest = typeof rangeStart === 'number' && typeof rangeEnd === 'number'
+    const estimatedMB = isRangeRequest ? (rangeEnd - rangeStart + 1) / (1024 * 1024) : 10
+    const estimatedBandwidth = Math.min(estimatedMB * 8, 100) // Convert to Mbps, cap at 100
+
+    // Cost-aware TURN allocation check
+    const turnRequest: TurnAllocationRequest = {
+      peerId: fromPeerId,
+      estimatedBandwidthMbps: estimatedBandwidth,
+      userTier: userTier || 'free',
+      isPremium: isPremium || false,
+      p2pAttempted: false, // Will be checked later
+      storeId,
+      rangeStart,
+      rangeEnd
+    }
+
+    const turnResponse = await costAwareTURN.handleAllocationRequest(turnRequest)
+    
+    if (!turnResponse.success) {
+      return res.status(429).json({
+        error: `Cost-aware throttling: ${turnResponse.error}`,
+        retryAfter: turnResponse.retryAfter,
+        suggestion: turnResponse.suggestion,
+        costInfo: turnResponse.costInfo
+      })
+    }
+
+    // Update session bandwidth tracking if we have a session
+    if (turnResponse.sessionId) {
+      const bytesToTransfer = isRangeRequest ? (rangeEnd - rangeStart + 1) : (totalSize || 1024 * 1024)
+      costAwareTURN.updateSessionBandwidth(turnResponse.sessionId, bytesToTransfer)
+    }
+
     const logMsg = isRangeRequest 
-      ? `🔄 Store range relay: ${storeId} (${rangeStart}-${rangeEnd}) from ${fromPeerId} to ${toPeerId}`
-      : `🔄 Store relay: ${storeId} from ${fromPeerId} to ${toPeerId}`
+      ? `🔄 Cost-aware store range relay: ${storeId} (${rangeStart}-${rangeEnd}) from ${fromPeerId} to ${toPeerId} [${turnResponse.limits?.priorityLevel}]`
+      : `🔄 Cost-aware store relay: ${storeId} from ${fromPeerId} to ${toPeerId} [${turnResponse.limits?.priorityLevel}]`
     
     console.log(logMsg)
 
@@ -1330,47 +1437,74 @@ function calculatePeerPrivacyLevel(peer: RegisteredPeer): string {
   return 'INSUFFICIENT'
 }
 
+// Initialize cost-aware TURN server and start the server
+async function startServer() {
+  try {
+    // Initialize cost monitoring
+    await costAwareTURN.initialize()
+    
+    // Start the HTTP server
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log('✅ DIG Bootstrap Server started successfully!')
+      console.log(`🌐 HTTP Server: http://0.0.0.0:${PORT}`)
+      console.log(`🔌 Socket.IO: enabled for WebSocket relay`)
+      console.log(`📡 TURN coordination: enabled with cost-aware throttling`)
+      console.log(`💰 Budget monitoring: enabled`)
+      console.log(`🔐 Privacy enforcement: MANDATORY`)
+      console.log('')
+      console.log('💰 COST-AWARE FEATURES:')
+      console.log(`   💵 Monthly budget: $${process.env.MONTHLY_BUDGET || '800'}`)
+      console.log('   📊 Real-time AWS cost monitoring')
+      console.log('   🚦 Multi-tier throttling (warning → throttle → emergency)')
+      console.log('   👑 User tier prioritization')
+      console.log('   📈 Bandwidth limiting and session management')
+      console.log('   🚨 Emergency shutdown protection')
+      console.log('')
+      console.log('🛡️ MANDATORY PRIVACY FEATURES:')
+      console.log('   🔊 Noise encryption required')
+      console.log('   🔐 Crypto-IPv6 addresses only')
+      console.log('   🕵️ Zero-knowledge proofs enabled')
+      console.log('   🧅 Onion routing supported')
+      console.log('   ⏱️ Timing obfuscation active')
+      console.log('   🔀 Traffic mixing enabled')
+      console.log('   🎭 Metadata scrambling active')
+      console.log('   🚫 Real IP addresses FORBIDDEN')
+      console.log('')
+      console.log('🔗 Available endpoints:')
+      console.log(`   Health: http://0.0.0.0:${PORT}/health`)
+      console.log(`   Register: POST http://0.0.0.0:${PORT}/register`)
+      console.log(`   Peers: http://0.0.0.0:${PORT}/peers`)
+      console.log(`   Stats: http://0.0.0.0:${PORT}/stats`)
+      console.log(`   TURN Servers: http://0.0.0.0:${PORT}/turn-servers`)
+      console.log(`   Store Relay: POST http://0.0.0.0:${PORT}/relay-store`)
+      console.log(`   💰 TURN Allocation: POST http://0.0.0.0:${PORT}/allocate-turn`)
+      console.log(`   💰 Cost Stats: http://0.0.0.0:${PORT}/cost-stats`)
+      console.log('')
+      console.log('💡 DIG nodes can connect using:')
+      console.log(`   DIG_BOOTSTRAP_NODES="http://[HOSTNAME]:${PORT}"`)
+    })
+  } catch (error) {
+    console.error('❌ Failed to start server:', error)
+    process.exit(1)
+  }
+}
+
 // Start the server
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log('✅ DIG Bootstrap Server started successfully!')
-  console.log(`🌐 HTTP Server: http://0.0.0.0:${PORT}`)
-  console.log(`🔌 Socket.IO: enabled for WebSocket relay`)
-  console.log(`📡 TURN coordination: enabled`)
-  console.log(`🔐 Privacy enforcement: MANDATORY`)
-  console.log('')
-  console.log('🛡️ MANDATORY PRIVACY FEATURES:')
-  console.log('   🔊 Noise encryption required')
-  console.log('   🔐 Crypto-IPv6 addresses only')
-  console.log('   🕵️ Zero-knowledge proofs enabled')
-  console.log('   🧅 Onion routing supported')
-  console.log('   ⏱️ Timing obfuscation active')
-  console.log('   🔀 Traffic mixing enabled')
-  console.log('   🎭 Metadata scrambling active')
-  console.log('   🚫 Real IP addresses FORBIDDEN')
-  console.log('')
-  console.log('🔗 Available endpoints:')
-  console.log(`   Health: http://0.0.0.0:${PORT}/health`)
-  console.log(`   Register: POST http://0.0.0.0:${PORT}/register`)
-  console.log(`   Peers: http://0.0.0.0:${PORT}/peers`)
-  console.log(`   Stats: http://0.0.0.0:${PORT}/stats`)
-  console.log(`   TURN Servers: http://0.0.0.0:${PORT}/turn-servers`)
-  console.log(`   Store Relay: POST http://0.0.0.0:${PORT}/relay-store`)
-  console.log('')
-  console.log('💡 DIG nodes can connect using:')
-  console.log(`   DIG_BOOTSTRAP_NODES="http://[HOSTNAME]:${PORT}"`)
-})
+startServer()
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('🛑 Received SIGTERM, shutting down gracefully...')
+  await costAwareTURN.cleanup()
   httpServer.close(() => {
     console.log('✅ Bootstrap server closed')
     process.exit(0)
   })
 })
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('🛑 Received SIGINT, shutting down gracefully...')
+  await costAwareTURN.cleanup()
   httpServer.close(() => {
     console.log('✅ Bootstrap server closed')
     process.exit(0)

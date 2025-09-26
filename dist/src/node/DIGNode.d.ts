@@ -40,6 +40,7 @@ export declare class DIGNode {
     start(): Promise<void>;
     private initializeLibP2PWithNATTraversal;
     private initializeIntelligentSubsystems;
+    private setupAWSBootstrapFallback;
     private setupDIGPeerIdentification;
     private handleNewPeerConnection;
     private handlePeerDisconnection;
@@ -82,6 +83,7 @@ export declare class DIGNode {
     getMetrics(): any;
     getNetworkHealth(): any;
     downloadStore(storeId: string): Promise<boolean>;
+    private downloadViaAWSBootstrapTURN;
     hasStore(storeId: string): boolean;
     findStorePeers(storeId: string): Promise<any[]>;
     connectToPeer(peerAddress: string): Promise<void>;
@@ -91,7 +93,11 @@ export declare class DIGNode {
     getUPnPStatus(): any;
     getMultiaddrs(): any[];
     private getAvailableConnectionMethods;
+    private getAWSBootstrapConfig;
+    useAWSBootstrapFallback(): Promise<boolean>;
+    useAWSBootstrapTURNFallback(targetPeerId: string, storeId?: string): Promise<any>;
     discoverAllPeers(): Promise<void>;
+    private discoverPeersFromAWSBootstrap;
     forceConnectToPeers(): Promise<void>;
     stop(): Promise<void>;
     private cleanup;
