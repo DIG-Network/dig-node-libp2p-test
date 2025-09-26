@@ -212,36 +212,48 @@ export class CostAwareTURNServer {
           Start: startOfMonth.toISOString().split('T')[0],
           End: now.toISOString().split('T')[0]
         },
-        Granularity: 'MONTHLY',
+        Granularity: 'DAILY',
         Metrics: ['BlendedCost'],
         GroupBy: [{
-          Type: 'DIMENSION',
-          Key: 'SERVICE'
-        }]
+          Type: 'TAG',
+          Key: 'elasticbeanstalk:environment-name'
+        }],
+        Filter: {
+          Tags: {
+            Key: 'elasticbeanstalk:environment-name',
+            Values: ['dig-bootstrap-v2-prod'],
+            MatchOptions: ['EQUALS']
+          }
+        }
       })
 
       const response = await this.costExplorer.send(command)
       
-      if (response.ResultsByTime && response.ResultsByTime[0]) {
-        const result = response.ResultsByTime[0]
+      if (response.ResultsByTime && response.ResultsByTime.length > 0) {
         let totalCost = 0
         let dataTransferCost = 0
         let computeCost = 0
 
-        if (result.Groups) {
-          for (const group of result.Groups) {
-            const serviceName = group.Keys?.[0] || 'Unknown'
-            const cost = parseFloat(group.Metrics?.BlendedCost?.Amount || '0')
-            totalCost += cost
+        // Sum costs across all days for this month
+        for (const dailyResult of response.ResultsByTime) {
+          if (dailyResult.Groups) {
+            for (const group of dailyResult.Groups) {
+              const environmentName = group.Keys?.[0] || ''
+              
+              // Only include costs for our specific environment
+              if (environmentName === 'dig-bootstrap-v2-prod') {
+                const cost = parseFloat(group.Metrics?.BlendedCost?.Amount || '0')
+                totalCost += cost
 
-            // Categorize costs
-            if (serviceName.toLowerCase().includes('data') || 
-                serviceName.toLowerCase().includes('transfer')) {
-              dataTransferCost += cost
-            } else if (serviceName.toLowerCase().includes('ec2') || 
-                       serviceName.toLowerCase().includes('compute')) {
-              computeCost += cost
+                // For Elastic Beanstalk, most costs are compute
+                computeCost += cost
+              }
             }
+          } else if (dailyResult.Total) {
+            // If no groups, use total (filtered by our environment)
+            const cost = parseFloat(dailyResult.Total.BlendedCost?.Amount || '0')
+            totalCost += cost
+            computeCost += cost
           }
         }
 
@@ -261,16 +273,56 @@ export class CostAwareTURNServer {
           storageCosts: totalCost - dataTransferCost - computeCost
         }
 
-        this.logger.info(`💰 Cost update: $${totalCost.toFixed(2)} spent, $${projectedMonthlySpend.toFixed(2)} projected (${(this.currentCostMetrics.costRatio * 100).toFixed(1)}% of budget)`)
+        this.logger.info(`💰 EB App cost update: $${totalCost.toFixed(2)} spent, $${projectedMonthlySpend.toFixed(2)} projected (${(this.currentCostMetrics.costRatio * 100).toFixed(1)}% of EB budget)`)
 
         // Send metrics to CloudWatch
         await this.sendCostMetrics()
 
+      } else {
+        // Fallback: Use conservative EB-only estimate
+        this.logger.warn('⚠️ No EB-specific cost data found, using conservative estimate')
+        await this.useElasticBeanstalkCostEstimate()
       }
     } catch (error) {
       this.logger.error('Failed to update cost metrics:', error)
-      // Use conservative estimate if API fails
-      this.currentCostMetrics.costRatio = Math.min(this.currentCostMetrics.costRatio + 0.1, 0.9)
+      // Use conservative EB estimate if API fails
+      await this.useElasticBeanstalkCostEstimate()
+    }
+  }
+
+  // Use conservative Elastic Beanstalk cost estimate
+  private async useElasticBeanstalkCostEstimate(): Promise<void> {
+    try {
+      // Conservative estimate for t3.small EB environment:
+      // - EC2 instance: ~$15-20/month
+      // - Load balancer: ~$20-25/month  
+      // - Data transfer: ~$5-15/month (depending on usage)
+      // Total estimated: $40-60/month for typical usage
+
+      const now = new Date()
+      const dayOfMonth = now.getDate()
+      const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+      
+      // Conservative daily cost estimate: $2/day = ~$60/month
+      const estimatedDailyCost = 2.0
+      const estimatedCurrentSpend = dayOfMonth * estimatedDailyCost
+      const estimatedMonthlySpend = daysInMonth * estimatedDailyCost
+
+      this.currentCostMetrics = {
+        currentSpend: estimatedCurrentSpend,
+        projectedMonthlySpend: estimatedMonthlySpend,
+        budgetLimit: this.monthlyBudget,
+        costRatio: estimatedMonthlySpend / this.monthlyBudget,
+        lastUpdated: Date.now(),
+        dataTransferCosts: estimatedCurrentSpend * 0.2, // ~20% data transfer
+        computeCosts: estimatedCurrentSpend * 0.7, // ~70% compute
+        storageCosts: estimatedCurrentSpend * 0.1 // ~10% storage
+      }
+
+      this.logger.info(`💰 EB Conservative estimate: $${estimatedCurrentSpend.toFixed(2)} spent, $${estimatedMonthlySpend.toFixed(2)} projected (${(this.currentCostMetrics.costRatio * 100).toFixed(1)}% of budget)`)
+
+    } catch (error) {
+      this.logger.error('Failed to create cost estimate:', error)
     }
   }
 
