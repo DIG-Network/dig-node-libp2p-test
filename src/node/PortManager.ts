@@ -113,11 +113,11 @@ export class PortManager {
   // Generate LibP2P address configuration with UPnP-safe ports
   async generateLibP2PAddressConfig(preferredPort: number, isAWS: boolean): Promise<any> {
     try {
-      // Use safe ports for Google Nest WiFi compatibility
-      const mainPort = await this.findAvailablePort(this.SAFE_PORTS.LIBP2P, 'libp2p-main')
+      // Use safe ports for Google Nest WiFi compatibility, but ensure uniqueness
+      const mainPort = await this.findAvailablePort(preferredPort || this.SAFE_PORTS.LIBP2P, 'libp2p-main')
       
-      // Use safe WebSocket port
-      const wsPort = await this.findAvailablePort(this.SAFE_PORTS.WEBSOCKET, 'libp2p-websocket')
+      // Use next available port for WebSocket
+      const wsPort = await this.findAvailablePort(mainPort + 1, 'libp2p-websocket')
 
       // Generate address configuration
       const addresses = {

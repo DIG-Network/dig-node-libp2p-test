@@ -180,14 +180,13 @@ export class DIGNode {
         }
         // Peer discovery configuration - enhanced for local DIG node discovery
         const peerDiscovery = [];
-        // Always use public LibP2P bootstrap servers for global connectivity
+        // Use minimal stable LibP2P bootstrap servers to reduce connection churn
         try {
             const bootstrapList = [
-                // Public LibP2P bootstrap servers (primary)
+                // Use only most stable bootstrap servers
                 '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-                '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-                '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VBuFTjXPyBWWBGGvCVXVWb3DqhJ',
-                '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
+                '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
+                // Reduced to 2 servers to minimize connection churn
             ];
             // Add custom DIG bootstrap servers if provided
             if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
@@ -230,7 +229,7 @@ export class DIGNode {
                 this.logger.warn('⚠️ Custom discovery servers disabled:', error);
             }
         }
-        // Create LibP2P node
+        // Create LibP2P node with stable configuration
         this.node = await createLibp2p({
             addresses,
             transports,
@@ -239,9 +238,9 @@ export class DIGNode {
             peerDiscovery,
             services,
             connectionManager: {
-                maxConnections: 100,
-                dialTimeout: 60000, // Longer timeout for NAT traversal
-                maxParallelDials: 10
+                maxConnections: 20, // Much more conservative
+                dialTimeout: 15000, // Shorter timeout to prevent hangs
+                maxParallelDials: 2 // Minimal parallel connections
             }
         });
         // Set up protocol handlers
