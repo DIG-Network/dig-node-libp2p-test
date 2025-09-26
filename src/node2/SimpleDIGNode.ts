@@ -18,6 +18,7 @@ import { bootstrap } from '@libp2p/bootstrap'
 import { mdns } from '@libp2p/mdns'
 import { ping } from '@libp2p/ping'
 import { identify } from '@libp2p/identify'
+import { gossipsub } from '@chainsafe/libp2p-gossipsub'
 import { pipe } from 'it-pipe'
 import { toString as uint8ArrayToString } from 'uint8arrays/to-string'
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string'
@@ -50,11 +51,11 @@ export class SimpleDIGNode {
   // DIG Network protocol
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
-  // Public LibP2P bootstrap servers (stable, maintained by Protocol Labs)
-  private readonly BOOTSTRAP_SERVERS = [
-    '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
-  ]
+  // Single stable bootstrap server (ensure both nodes connect to same network)
+  private readonly BOOTSTRAP_SERVER = '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN'
+  
+  // DIG Network gossip topic for peer announcements
+  private readonly DIG_GOSSIP_TOPIC = 'dig-network-simple-v1'
 
   constructor(private port: number = 0) {
     this.digPath = join(homedir(), '.dig')
@@ -79,13 +80,14 @@ export class SimpleDIGNode {
         connectionEncrypters: [noise()],
         streamMuxers: [yamux()],
         peerDiscovery: [
-          bootstrap({ list: this.BOOTSTRAP_SERVERS }),
+          bootstrap({ list: [this.BOOTSTRAP_SERVER] }), // Single server for reliability
           mdns() // Local network discovery
         ],
         services: {
           ping: ping(),
           identify: identify(),
-          dht: kadDHT({ clientMode: false }) // Enable DHT for peer discovery
+          dht: kadDHT({ clientMode: false }), // Enable DHT for peer discovery
+          gossipsub: gossipsub({ emitSelf: false }) // Enable gossip for DIG announcements
         },
         connectionManager: {
           maxConnections: 10, // Conservative limit
@@ -110,6 +112,12 @@ export class SimpleDIGNode {
 
       // Announce our stores to the network
       await this.announceStores()
+
+      // Set up DIG network announcements for peer discovery
+      setTimeout(async () => {
+        await this.setupDIGNetworkAnnouncements()
+        await this.searchForDIGPeersInDHT()
+      }, 10000) // Wait 10 seconds for LibP2P to stabilize
 
       this.isStarted = true
       console.log('✅ Simple DIG Node started successfully')
@@ -369,33 +377,6 @@ export class SimpleDIGNode {
     }
   }
 
-  // Announce our stores to the DHT
-  private async announceStores(): Promise<void> {
-    try {
-      const dht = this.node.services.dht as any
-      if (!dht) return
-
-      for (const storeId of this.digFiles.keys()) {
-        try {
-          const key = uint8ArrayFromString(`/dig-simple/${storeId}`)
-          const value = uint8ArrayFromString(JSON.stringify({
-            peerId: this.node.peerId.toString(),
-            storeId,
-            timestamp: Date.now()
-          }))
-          
-          await dht.put(key, value)
-        } catch (error) {
-          // Silent failure for DHT operations
-        }
-      }
-
-      console.log(`📡 Announced ${this.digFiles.size} stores to DHT`)
-
-    } catch (error) {
-      console.debug('Store announcement failed:', error)
-    }
-  }
 
   // Start periodic sync with discovered peers
   private startPeriodicSync(): void {
@@ -458,6 +439,201 @@ export class SimpleDIGNode {
   async syncNow(): Promise<void> {
     console.log('🔄 Manual sync triggered...')
     await this.syncWithAllPeers()
+  }
+
+  // Set up DIG network announcements via gossip and DHT
+  private async setupDIGNetworkAnnouncements(): Promise<void> {
+    try {
+      console.log('📡 Setting up DIG network announcements...')
+
+      // Subscribe to DIG gossip topic
+      const gossipsub = this.node.services.gossipsub as any
+      if (gossipsub) {
+        await gossipsub.subscribe(this.DIG_GOSSIP_TOPIC)
+        
+        // Handle DIG peer announcements
+        gossipsub.addEventListener('message', (evt: any) => {
+          if (evt.detail.topic === this.DIG_GOSSIP_TOPIC) {
+            this.handleDIGGossipMessage(evt.detail.data)
+          }
+        })
+
+        // Announce ourselves via gossip
+        await this.announceDIGNodeViaGossip()
+        
+        console.log(`✅ Subscribed to DIG gossip topic: ${this.DIG_GOSSIP_TOPIC}`)
+      }
+
+    } catch (error) {
+      console.warn('Failed to setup DIG announcements:', error)
+    }
+  }
+
+  // Announce DIG node via gossip
+  private async announceDIGNodeViaGossip(): Promise<void> {
+    try {
+      const gossipsub = this.node.services.gossipsub as any
+      if (!gossipsub) return
+
+      const announcement = {
+        type: 'dig_node_announcement',
+        peerId: this.node.peerId.toString(),
+        stores: Array.from(this.digFiles.keys()),
+        addresses: this.node.getMultiaddrs().map(addr => addr.toString()),
+        timestamp: Date.now()
+      }
+
+      await gossipsub.publish(
+        this.DIG_GOSSIP_TOPIC,
+        uint8ArrayFromString(JSON.stringify(announcement))
+      )
+
+      console.log(`📡 Announced DIG node via gossip (${this.digFiles.size} stores)`)
+
+    } catch (error) {
+      console.debug('Gossip announcement failed:', error)
+    }
+  }
+
+  // Handle DIG gossip messages
+  private async handleDIGGossipMessage(data: Uint8Array): Promise<void> {
+    try {
+      const message = JSON.parse(uint8ArrayToString(data))
+      
+      if (message.type === 'dig_node_announcement' && 
+          message.peerId !== this.node.peerId.toString()) {
+        
+        console.log(`📡 Received DIG node announcement: ${message.peerId.substring(0, 20)}... (${message.stores.length} stores)`)
+        
+        // Add to DIG peers
+        this.digPeers.set(message.peerId, {
+          peerId: message.peerId,
+          stores: message.stores || [],
+          lastSeen: Date.now()
+        })
+
+        // Try to connect to this DIG peer
+        await this.connectToDIGPeer(message.peerId, message.addresses)
+      }
+
+    } catch (error) {
+      console.debug('Failed to handle gossip message:', error)
+    }
+  }
+
+  // Search for DIG peers in DHT
+  private async searchForDIGPeersInDHT(): Promise<void> {
+    try {
+      console.log('🔍 Searching for DIG peers in DHT...')
+      
+      const dht = this.node.services.dht as any
+      if (!dht) return
+
+      // Search for DIG nodes in DHT
+      const searchKey = uint8ArrayFromString('/dig-simple/nodes')
+      
+      try {
+        for await (const event of dht.get(searchKey)) {
+          if (event.name === 'VALUE') {
+            try {
+              const peerInfo = JSON.parse(uint8ArrayToString(event.value))
+              if (peerInfo.peerId !== this.node.peerId.toString()) {
+                console.log(`🔍 Found DIG peer in DHT: ${peerInfo.peerId.substring(0, 20)}...`)
+                
+                this.digPeers.set(peerInfo.peerId, {
+                  peerId: peerInfo.peerId,
+                  stores: peerInfo.stores || [],
+                  lastSeen: Date.now()
+                })
+
+                // Try to connect
+                await this.connectToDIGPeer(peerInfo.peerId, peerInfo.addresses)
+              }
+            } catch (parseError) {
+              // Silent parse failure
+            }
+          }
+        }
+      } catch (searchError) {
+        console.debug('DHT search failed (expected during bootstrap):', searchError)
+      }
+
+    } catch (error) {
+      console.debug('DHT search failed:', error)
+    }
+  }
+
+  // Try to connect to a DIG peer
+  private async connectToDIGPeer(peerId: string, addresses: string[]): Promise<void> {
+    try {
+      // Check if already connected
+      const existingPeer = this.node.getPeers().find(p => p.toString() === peerId)
+      if (existingPeer) {
+        console.log(`✅ Already connected to DIG peer: ${peerId.substring(0, 20)}...`)
+        return
+      }
+
+      // Try to connect using provided addresses
+      if (addresses && addresses.length > 0) {
+        for (const address of addresses.slice(0, 2)) { // Try first 2 addresses
+          try {
+            const { multiaddr } = await import('@multiformats/multiaddr')
+            const addr = multiaddr(address)
+            await this.node.dial(addr)
+            console.log(`✅ Connected to DIG peer: ${peerId.substring(0, 20)}...`)
+            return
+          } catch (dialError) {
+            console.debug(`Failed to dial ${address}:`, dialError)
+          }
+        }
+      }
+
+    } catch (error) {
+      console.debug(`Failed to connect to DIG peer ${peerId}:`, error)
+    }
+  }
+
+  // Enhanced store announcements to DHT
+  private async announceStores(): Promise<void> {
+    try {
+      const dht = this.node.services.dht as any
+      if (!dht) return
+
+      // Announce individual stores
+      for (const storeId of this.digFiles.keys()) {
+        try {
+          const key = uint8ArrayFromString(`/dig-simple/store/${storeId}`)
+          const value = uint8ArrayFromString(JSON.stringify({
+            peerId: this.node.peerId.toString(),
+            storeId,
+            timestamp: Date.now()
+          }))
+          
+          await dht.put(key, value)
+        } catch (error) {
+          // Silent failure for individual store announcements
+        }
+      }
+
+      // Announce our node in DHT
+      try {
+        const nodeKey = uint8ArrayFromString('/dig-simple/nodes')
+        const nodeValue = uint8ArrayFromString(JSON.stringify({
+          peerId: this.node.peerId.toString(),
+          stores: Array.from(this.digFiles.keys()),
+          addresses: this.node.getMultiaddrs().map(addr => addr.toString()),
+          timestamp: Date.now()
+        }))
+        
+        await dht.put(nodeKey, nodeValue)
+        console.log(`📡 Announced DIG node to DHT (${this.digFiles.size} stores)`)
+      } catch (nodeError) {
+        console.debug('DHT node announcement failed:', nodeError)
+      }
+
+    } catch (error) {
+      console.debug('Store announcement failed:', error)
+    }
   }
 
   // Stop the node
