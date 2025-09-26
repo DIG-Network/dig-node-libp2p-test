@@ -51,8 +51,9 @@ export class SimpleDIGNode {
   // DIG Network protocol
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
-  // Single reliable bootstrap server (both nodes connect to same network)
-  private readonly BOOTSTRAP_SERVER = '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN'
+  // Direct IP bootstrap server (more reliable than DNS)
+  // Bootstrap servers - can be empty for local-only connections
+  private readonly BOOTSTRAP_SERVERS: string[] = []
   
   // DIG Network gossip topic for peer announcements
   private readonly DIG_GOSSIP_TOPIC = 'dig-network-simple-v1'
@@ -80,8 +81,7 @@ export class SimpleDIGNode {
         connectionEncrypters: [noise()],
         streamMuxers: [yamux()],
         peerDiscovery: [
-          bootstrap({ list: [this.BOOTSTRAP_SERVER] }), // Single server for reliability
-          mdns() // Local network discovery
+          mdns() // Local network discovery only - no external bootstrap
         ],
         services: {
           ping: ping(),
@@ -100,6 +100,16 @@ export class SimpleDIGNode {
 
       console.log(`✅ LibP2P node started: ${this.node.peerId.toString()}`)
       console.log(`📍 Listening on: ${this.node.getMultiaddrs().map(addr => addr.toString()).join(', ')}`)
+      console.log(`🔗 Bootstrap: Local network discovery only`)
+      
+      // Monitor initial connection to bootstrap
+      setTimeout(() => {
+        const peers = this.node.getPeers()
+        console.log(`📊 After 15s: Connected to ${peers.length} LibP2P peers`)
+        if (peers.length === 0) {
+          console.log('⚠️ Not connected to bootstrap server - checking connectivity...')
+        }
+      }, 15000)
 
       // Load local .dig files
       await this.loadDIGFiles()
@@ -117,7 +127,10 @@ export class SimpleDIGNode {
       setTimeout(async () => {
         await this.setupDIGNetworkAnnouncements()
         await this.searchForDIGPeersInDHT()
-      }, 10000) // Wait 10 seconds for LibP2P to stabilize
+        
+        // Also test all currently connected peers for DIG protocol
+        await this.testAllConnectedPeersForDIG()
+      }, 15000) // Wait 15 seconds for LibP2P to stabilize
 
       this.isStarted = true
       console.log('✅ Simple DIG Node started successfully')
@@ -161,10 +174,10 @@ export class SimpleDIGNode {
       const peerId = event.detail.toString()
       console.log(`🤝 Connected to peer: ${peerId.substring(0, 20)}...`)
       
-      // Test if this peer supports DIG protocol
+      // Test if this peer supports DIG protocol IMMEDIATELY
       setTimeout(async () => {
         await this.testPeerForDIG(peerId)
-      }, 2000) // Wait for connection to stabilize
+      }, 100) // Test almost immediately
     })
 
     // Handle peer disconnections
@@ -226,41 +239,47 @@ export class SimpleDIGNode {
         stream,
         async function* (source: any) {
           for await (const chunk of source) {
-            const request = JSON.parse(uint8ArrayToString(chunk))
+            try {
+              if (!chunk || chunk.length === 0) continue
+              const chunkData = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray())
+              const request = JSON.parse(uint8ArrayToString(chunkData))
             
-            if (request.type === 'list_stores') {
-              // Return list of available stores
-              const response = {
-                success: true,
-                stores: Array.from(self.digFiles.keys()),
-                peerId: self.node.peerId.toString()
-              }
-              yield uint8ArrayFromString(JSON.stringify(response))
-              
-            } else if (request.type === 'get_store' && request.storeId) {
-              // Return specific store content
-              const digFile = self.digFiles.get(request.storeId)
-              if (digFile) {
+              if (request.type === 'list_stores') {
+                // Return list of available stores
                 const response = {
                   success: true,
-                  storeId: request.storeId,
-                  size: digFile.size
+                  stores: Array.from(self.digFiles.keys()),
+                  peerId: self.node.peerId.toString()
                 }
-                yield uint8ArrayFromString(JSON.stringify(response) + '\n')
-                
-                // Send file content in chunks
-                const CHUNK_SIZE = 64 * 1024
-                for (let i = 0; i < digFile.content.length; i += CHUNK_SIZE) {
-                  yield digFile.content.subarray(i, i + CHUNK_SIZE)
-                }
-              } else {
-                const response = { success: false, error: 'Store not found' }
                 yield uint8ArrayFromString(JSON.stringify(response))
+                
+              } else if (request.type === 'get_store' && request.storeId) {
+                // Return specific store content
+                const digFile = self.digFiles.get(request.storeId)
+                if (digFile) {
+                  const response = {
+                    success: true,
+                    storeId: request.storeId,
+                    size: digFile.size
+                  }
+                  yield uint8ArrayFromString(JSON.stringify(response) + '\n')
+                  
+                  // Send file content in chunks
+                  const CHUNK_SIZE = 64 * 1024
+                  for (let i = 0; i < digFile.content.length; i += CHUNK_SIZE) {
+                    yield digFile.content.subarray(i, i + CHUNK_SIZE)
+                  }
+                } else {
+                  const response = { success: false, error: 'Store not found' }
+                  yield uint8ArrayFromString(JSON.stringify(response))
+                }
               }
+            } catch (chunkError) {
+              console.debug('Failed to process chunk:', chunkError)
             }
             break
           }
-        }.bind(this),
+        },
         stream
       )
     } catch (error) {
@@ -433,6 +452,42 @@ export class SimpleDIGNode {
   // Get DIG peers
   getDIGPeers(): DIGPeer[] {
     return Array.from(this.digPeers.values())
+  }
+
+  // Test all currently connected peers for DIG protocol
+  private async testAllConnectedPeersForDIG(): Promise<void> {
+    try {
+      const connectedPeers = this.node.getPeers()
+      console.log(`🔍 Testing ${connectedPeers.length} connected peers for DIG protocol...`)
+      
+      for (const peer of connectedPeers) {
+        const peerId = peer.toString()
+        await this.testPeerForDIG(peerId)
+      }
+      
+    } catch (error) {
+      console.error('Failed to test connected peers:', error)
+    }
+  }
+
+  // Manual connection to remote DIG node
+  async connectToRemote(address: string): Promise<void> {
+    try {
+      console.log(`🔗 Connecting to remote DIG node: ${address}`)
+      const { multiaddr } = await import('@multiformats/multiaddr')
+      const addr = multiaddr(address)
+      await this.node.dial(addr)
+      console.log('✅ Connected to remote node!')
+      
+      // Wait for DIG protocol testing
+      setTimeout(() => {
+        const digPeers = this.getDIGPeers()
+        console.log(`🎯 DIG peers after connection: ${digPeers.length}`)
+      }, 3000)
+      
+    } catch (error) {
+      console.error('❌ Failed to connect to remote:', error)
+    }
   }
 
   // Manual sync trigger
