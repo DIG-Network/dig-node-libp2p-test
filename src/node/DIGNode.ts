@@ -627,6 +627,11 @@ export class DIGNode {
     await this.safeServiceInit('TURN Coordination', () => this.turnCoordination.start())
     await this.safeServiceInit('Connection Capabilities', () => this.peerCapabilities.initialize())
     await this.safeServiceInit('Download Orchestrator', () => this.downloadOrchestrator.initialize())
+    
+    // Start HTTP server for direct downloads if TURN capable
+    if (this.nodeCapabilities.turnServer || this.upnpPortManager?.getExternalIP()) {
+      await this.safeServiceInit('HTTP Download Server', () => this.startHTTPDownloadServer())
+    }
 
     // Start WebSocket relay only if custom discovery servers are configured
     // (Public bootstrap doesn't need WebSocket relay)
@@ -647,6 +652,84 @@ export class DIGNode {
     this.startStoreSync()
     
     this.logger.info('✅ All core services started')
+  }
+
+  // Start HTTP server for direct .dig file downloads
+  private async startHTTPDownloadServer(): Promise<void> {
+    try {
+      const express = await import('express')
+      const app = express.default()
+      const httpPort = (this.config.port || 4001) + 1000
+
+      // Enable CORS for cross-origin requests
+      app.use((req: any, res: any, next: any) => {
+        res.header('Access-Control-Allow-Origin', '*')
+        res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.header('Access-Control-Allow-Headers', 'Content-Type')
+        next()
+      })
+
+      // Health check endpoint
+      app.get('/health', (req: any, res: any) => {
+        res.json({
+          status: 'healthy',
+          service: 'DIG HTTP Download Server',
+          peerId: this.node.peerId.toString(),
+          stores: Array.from(this.digFiles.keys()),
+          timestamp: new Date().toISOString()
+        })
+      })
+
+      // Direct .dig file download endpoint
+      app.get('/download/:storeId', async (req: any, res: any) => {
+        try {
+          const { storeId } = req.params
+          
+          if (!this.digFiles.has(storeId)) {
+            return res.status(404).json({ error: `Store ${storeId} not found` })
+          }
+
+          const digFile = this.digFiles.get(storeId)!
+          const filePath = join(this.digPath, `${storeId}.dig`)
+          
+          this.logger.info(`📡 Serving direct HTTP download: ${storeId}`)
+          
+          // Read and serve the .dig file
+          const { readFile } = await import('fs/promises')
+          const fileData = await readFile(filePath)
+          
+          res.setHeader('Content-Type', 'application/octet-stream')
+          res.setHeader('Content-Length', fileData.length)
+          res.setHeader('Content-Disposition', `attachment; filename="${storeId}.dig"`)
+          
+          res.send(fileData)
+          
+          this.logger.info(`✅ Direct HTTP download served: ${storeId} (${fileData.length} bytes)`)
+          
+        } catch (error) {
+          this.logger.error(`Failed to serve ${req.params.storeId}:`, error)
+          res.status(500).json({ error: 'Download failed' })
+        }
+      })
+
+      // List available stores
+      app.get('/stores', (req: any, res: any) => {
+        res.json({
+          stores: Array.from(this.digFiles.keys()),
+          total: this.digFiles.size,
+          peerId: this.node.peerId.toString()
+        })
+      })
+
+      // Start HTTP server
+      app.listen(httpPort, '0.0.0.0', () => {
+        this.logger.info(`📡 HTTP download server started on port ${httpPort}`)
+        this.logger.info(`🔗 Direct download URL: http://[EXTERNAL_IP]:${httpPort}/download/[STORE_ID]`)
+      })
+
+    } catch (error) {
+      this.logger.warn('Failed to start HTTP download server:', error)
+    }
   }
 
   // Safely initialize services with error handling
@@ -1207,8 +1290,18 @@ export class DIGNode {
         return true
       }
       
-      // Fallback: Try AWS bootstrap TURN relay
-      this.logger.info(`🌐 Primary download failed for ${storeId} - trying AWS bootstrap TURN fallback...`)
+      // Fallback 1: Try direct HTTP connection to TURN-capable peers
+      this.logger.info(`🌐 Primary download failed for ${storeId} - trying direct connection to TURN-capable peers...`)
+      const directResult = await this.downloadViaDirectConnection(storeId)
+      
+      if (directResult) {
+        await this.saveDownloadedStore(storeId, directResult)
+        this.logger.info(`✅ Downloaded ${storeId} via direct HTTP connection`)
+        return true
+      }
+
+      // Fallback 2: Try AWS bootstrap TURN relay
+      this.logger.info(`📡 Direct connection failed for ${storeId} - trying AWS bootstrap TURN relay...`)
       const awsResult = await this.downloadViaAWSBootstrapTURN(storeId)
       
       if (awsResult) {
@@ -1221,6 +1314,81 @@ export class DIGNode {
     } catch (error) {
       this.logger.error(`Download failed for ${storeId}:`, error)
       return false
+    }
+  }
+
+  // Download directly from TURN-capable peers via HTTP
+  private async downloadViaDirectConnection(storeId: string): Promise<Buffer | null> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        return null
+      }
+
+      // Find TURN-capable peers with this store
+      const response = await fetch(`${awsConfig.url}/peers?includeStores=true`)
+      
+      if (!response.ok) {
+        return null
+      }
+
+      const result = await response.json()
+      const turnCapablePeersWithStore = result.peers?.filter((peer: any) => 
+        peer.stores?.includes(storeId) && 
+        peer.peerId !== this.node.peerId.toString() &&
+        peer.turnCapable === true &&
+        peer.turnAddresses?.length > 0
+      ) || []
+
+      if (turnCapablePeersWithStore.length === 0) {
+        this.logger.warn(`⚠️ No TURN-capable peers found with store ${storeId}`)
+        return null
+      }
+
+      // Try direct HTTP download from TURN-capable peers
+      for (const peer of turnCapablePeersWithStore) {
+        try {
+          this.logger.info(`📡 Attempting direct HTTP download from TURN-capable peer: ${peer.peerId}`)
+          
+          // Extract IP and port from TURN addresses
+          for (const turnAddress of peer.turnAddresses) {
+            try {
+              const match = turnAddress.match(/\/ip4\/([^\/]+)\/tcp\/(\d+)/)
+              if (match) {
+                const [, ip, port] = match
+                
+                // Try direct HTTP download (assuming peer runs HTTP server on port+1000)
+                const httpPort = parseInt(port) + 1000
+                const downloadUrl = `http://${ip}:${httpPort}/download/${storeId}`
+                
+                this.logger.info(`📡 Trying direct HTTP download: ${downloadUrl}`)
+                
+                const downloadResponse = await fetch(downloadUrl, {
+                  signal: AbortSignal.timeout(30000) // 30 second timeout
+                })
+                
+                if (downloadResponse.ok) {
+                  const data = await downloadResponse.arrayBuffer()
+                  this.logger.info(`✅ Direct HTTP download successful: ${data.byteLength} bytes from ${peer.peerId}`)
+                  return Buffer.from(data)
+                }
+              }
+            } catch (httpError) {
+              this.logger.debug(`Direct HTTP download failed from ${peer.peerId}:`, httpError)
+            }
+          }
+        } catch (error) {
+          this.logger.debug(`Failed to download from peer ${peer.peerId}:`, error)
+        }
+      }
+
+      // Fallback to AWS bootstrap TURN relay if direct HTTP fails
+      return await this.downloadViaAWSBootstrapTURN(storeId)
+
+    } catch (error) {
+      this.logger.debug('Direct connection download failed:', error)
+      return null
     }
   }
 

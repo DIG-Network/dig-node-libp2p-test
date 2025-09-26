@@ -49,6 +49,7 @@ export declare class DIGNode {
     private performDIGHandshake;
     private sendStreamMessage;
     private startCoreServices;
+    private startHTTPDownloadServer;
     private safeServiceInit;
     private handleDIGRequest;
     private handleDiscoveryRequest;
@@ -83,6 +84,7 @@ export declare class DIGNode {
     getMetrics(): any;
     getNetworkHealth(): any;
     downloadStore(storeId: string): Promise<boolean>;
+    private downloadViaDirectConnection;
     private downloadViaAWSBootstrapTURN;
     hasStore(storeId: string): boolean;
     findStorePeers(storeId: string): Promise<any[]>;
