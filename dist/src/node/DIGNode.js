@@ -826,17 +826,55 @@ export class DIGNode {
     getConnectionInfo() {
         const peers = this.node ? this.node.getPeers() : [];
         const digPeers = this.peerDiscovery?.getDIGPeers() || [];
+        const capabilityStats = this.peerCapabilities?.getCapabilityStats();
         return {
             listeningAddresses: this.node ? this.node.getMultiaddrs().map(addr => addr.toString()) : [],
             connectedPeers: peers.map(peer => peer.toString()),
             peerCount: peers.length,
             digPeers: digPeers.length,
             turnServers: this.turnCoordination?.getTurnStats()?.totalTurnServers || 0,
-            connectionCapabilities: this.peerCapabilities?.getCapabilityStats(),
+            connectionCapabilities: capabilityStats,
             upnpStatus: this.upnpPortManager?.getUPnPStatus(),
             externalAddresses: this.upnpPortManager?.getExternalAddresses() || [],
-            localNetworkStatus: this.localNetworkDiscovery?.getLocalNetworkStatus()
+            localNetworkStatus: this.localNetworkDiscovery?.getLocalNetworkStatus(),
+            canAcceptDirectConnections: capabilityStats ? capabilityStats.directCapablePeers > 0 : false,
+            canActAsTurnServer: capabilityStats ? capabilityStats.turnCapablePeers > 0 : false,
+            availableConnectionMethods: this.getAvailableConnectionMethods()
         };
+    }
+    getNodeCapabilities() {
+        return { ...this.nodeCapabilities };
+    }
+    getUPnPStatus() {
+        return this.upnpPortManager?.getUPnPStatus() || {
+            available: false,
+            totalMappings: 0,
+            activeMappings: 0,
+            portRanges: { libp2p: [], websocket: [], turn: [] },
+            lastRefresh: 0
+        };
+    }
+    getMultiaddrs() {
+        return this.node ? this.node.getMultiaddrs() : [];
+    }
+    getAvailableConnectionMethods() {
+        const methods = [];
+        if (this.nodeCapabilities.upnp)
+            methods.push('UPnP');
+        if (this.nodeCapabilities.autonat)
+            methods.push('AutoNAT');
+        if (this.nodeCapabilities.webrtc)
+            methods.push('WebRTC');
+        if (this.nodeCapabilities.websockets)
+            methods.push('WebSockets');
+        if (this.nodeCapabilities.circuitRelay)
+            methods.push('Circuit Relay');
+        if (this.nodeCapabilities.dht)
+            methods.push('DHT');
+        if (this.nodeCapabilities.mdns)
+            methods.push('mDNS');
+        methods.push('TCP Direct');
+        return methods;
     }
     async discoverAllPeers() {
         this.logger.info('🔍 Starting manual peer discovery...');

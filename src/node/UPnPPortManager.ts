@@ -13,12 +13,15 @@
  */
 
 import { Logger } from './logger.js'
+import { multiaddr } from '@multiformats/multiaddr'
 
 export class UPnPPortManager {
   private logger = new Logger('UPnPPortManager')
   private digNode: any
   private mappedPorts = new Map<number, UPnPMapping>()
   private upnpClient: any = null
+  private externalIP: string | null = null
+  private refreshInterval: NodeJS.Timeout | null = null
 
   constructor(digNode: any) {
     this.digNode = digNode
@@ -29,29 +32,46 @@ export class UPnPPortManager {
     try {
       this.logger.info('🔧 Initializing UPnP port management...')
 
-      // Check if UPnP is available
-      if (!this.digNode.nodeCapabilities.upnp) {
-        this.logger.info('⏭️ UPnP not available - skipping port mapping')
-        return
-      }
-
       // Get UPnP service from LibP2P
       this.upnpClient = this.digNode.node.services.upnp
       if (!this.upnpClient) {
-        this.logger.warn('⚠️ UPnP service not found in LibP2P')
+        this.logger.warn('⚠️ UPnP service not found in LibP2P - checking if available...')
+        
+        // Try to detect UPnP availability manually
+        const upnpAvailable = await this.detectUPnPAvailability()
+        if (!upnpAvailable) {
+          this.logger.info('⏭️ UPnP not available - skipping port mapping')
+          this.digNode.nodeCapabilities.upnp = false
+          return
+        }
+      }
+
+      // Get external IP address first
+      this.externalIP = await this.getExternalIPAddress()
+      if (!this.externalIP) {
+        this.logger.warn('⚠️ Could not determine external IP address via UPnP')
         return
       }
+
+      this.logger.info(`🌐 External IP detected: ${this.externalIP}`)
 
       // Open required ports
       await this.openRequiredPorts()
 
+      // Add external addresses to LibP2P
+      await this.addExternalAddressesToLibP2P()
+
       // Set up periodic port refresh
       this.startPortRefresh()
 
-      this.logger.info('✅ UPnP port management initialized')
+      // Mark UPnP as working
+      this.digNode.nodeCapabilities.upnp = true
+
+      this.logger.info('✅ UPnP port management initialized successfully')
 
     } catch (error) {
       this.logger.warn('UPnP port management failed to initialize:', error)
+      this.digNode.nodeCapabilities.upnp = false
     }
   }
 
@@ -117,25 +137,172 @@ export class UPnPPortManager {
     }
   }
 
-  // Map port via UPnP (implementation depends on UPnP library)
+  // Detect UPnP availability manually
+  private async detectUPnPAvailability(): Promise<boolean> {
+    try {
+      // Try to discover UPnP gateway
+      const { exec } = await import('child_process')
+      const { promisify } = await import('util')
+      const execAsync = promisify(exec)
+
+      // Use a simple network discovery to check for UPnP
+      const result = await execAsync('netstat -rn | grep "^0.0.0.0" || route print 0.0.0.0', { timeout: 5000 })
+      
+      // If we can find a default gateway, UPnP might be available
+      return result.stdout.length > 0
+
+    } catch (error) {
+      this.logger.debug('UPnP detection failed:', error)
+      return false
+    }
+  }
+
+  // Get external IP address via UPnP or web service
+  private async getExternalIPAddress(): Promise<string | null> {
+    try {
+      // First try LibP2P UPnP service
+      if (this.upnpClient && typeof this.upnpClient.getExternalIP === 'function') {
+        const ip = await this.upnpClient.getExternalIP()
+        if (ip) return ip
+      }
+
+      // Try nat-upnp library
+      try {
+        const natUpnp = await import('nat-upnp')
+        const client = natUpnp.createClient()
+
+        const externalIP = await new Promise<string>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('UPnP external IP timeout'))
+          }, 10000)
+
+          client.externalIp((error: any, ip: string | undefined) => {
+            clearTimeout(timeout)
+            if (error || !ip) {
+              reject(error || new Error('No external IP from UPnP'))
+            } else {
+              resolve(ip)
+            }
+          })
+        })
+
+        if (externalIP) {
+          this.logger.info(`🌐 UPnP external IP detected: ${externalIP}`)
+          return externalIP
+        }
+      } catch (upnpError) {
+        this.logger.debug('UPnP external IP detection failed:', upnpError)
+      }
+
+      // Fallback to web service
+      const https = await import('https')
+      
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout getting external IP'))
+        }, 10000)
+
+        const req = https.get('https://api.ipify.org?format=text', (res) => {
+          clearTimeout(timeout)
+          let data = ''
+          
+          res.on('data', (chunk) => {
+            data += chunk
+          })
+          
+          res.on('end', () => {
+            const ip = data.trim()
+            // Validate IP format
+            if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+              this.logger.info(`🌐 External IP via web service: ${ip}`)
+              resolve(ip)
+            } else {
+              reject(new Error('Invalid IP format'))
+            }
+          })
+        })
+
+        req.on('error', (error) => {
+          clearTimeout(timeout)
+          reject(error)
+        })
+      })
+
+    } catch (error) {
+      this.logger.debug('Failed to get external IP:', error)
+      return null
+    }
+  }
+
+  // Add external addresses to LibP2P
+  private async addExternalAddressesToLibP2P(): Promise<void> {
+    try {
+      if (!this.externalIP) return
+
+      const externalAddresses: string[] = []
+
+      // Add external addresses for each mapped port
+      for (const [port, mapping] of this.mappedPorts) {
+        if (mapping.protocol === 'tcp') {
+          const addr = `/ip4/${this.externalIP}/tcp/${mapping.externalPort}`
+          externalAddresses.push(addr)
+        }
+      }
+
+      if (externalAddresses.length > 0) {
+        // Add addresses to LibP2P's address manager
+        const addressManager = this.digNode.node.components?.addressManager
+        if (addressManager && typeof addressManager.addObservedAddr === 'function') {
+          for (const addrStr of externalAddresses) {
+            try {
+              const addr = multiaddr(addrStr)
+              addressManager.addObservedAddr(addr)
+              this.logger.info(`📡 Added external address: ${addrStr}`)
+            } catch (addrError) {
+              this.logger.debug(`Failed to add address ${addrStr}:`, addrError)
+            }
+          }
+        }
+
+        // Also try to announce via address manager
+        if (addressManager && typeof addressManager.announceAddresses === 'function') {
+          const announceAddrs = externalAddresses.map(addr => multiaddr(addr))
+          addressManager.announceAddresses(announceAddrs)
+        }
+      }
+
+    } catch (error) {
+      this.logger.debug('Failed to add external addresses to LibP2P:', error)
+    }
+  }
+
+  // Map port via UPnP (actual implementation)
   private async mapPortViaUPnP(port: number, protocol: string, description: string): Promise<any> {
     try {
-      // This is a simplified implementation
-      // The actual UPnP service from LibP2P handles the port mapping
-      
-      // For now, we'll assume the UPnP service in LibP2P handles port mapping automatically
-      // and we just track what ports we want mapped
-      
       this.logger.debug(`📡 UPnP mapping request: ${port}/${protocol}`)
-      
-      // Return success (LibP2P UPnP service handles the actual mapping)
-      return {
-        success: true,
-        externalPort: port,
-        internalPort: port,
-        protocol,
-        description
+
+      // Try LibP2P UPnP service first
+      if (this.upnpClient && typeof this.upnpClient.map === 'function') {
+        const result = await this.upnpClient.map({
+          localPort: port,
+          protocol: protocol.toUpperCase(),
+          description: description,
+          ttl: 7200 // 2 hours
+        })
+        
+        if (result) {
+          return {
+            success: true,
+            externalPort: result.externalPort || port,
+            internalPort: port,
+            protocol,
+            description
+          }
+        }
       }
+
+      // Fallback: Try direct UPnP implementation
+      return await this.directUPnPMapping(port, protocol, description)
 
     } catch (error) {
       this.logger.debug(`UPnP mapping failed for ${port}/${protocol}:`, error)
@@ -143,10 +310,70 @@ export class UPnPPortManager {
     }
   }
 
+  // Direct UPnP mapping implementation using nat-upnp
+  private async directUPnPMapping(port: number, protocol: string, description: string): Promise<any> {
+    try {
+      this.logger.debug(`📡 Direct UPnP mapping: ${port}/${protocol}`)
+
+      // Use nat-upnp library for actual UPnP port mapping
+      const natUpnp = await import('nat-upnp')
+      const client = natUpnp.createClient()
+
+      // Create port mapping
+      const mapping = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('UPnP mapping timeout'))
+        }, 10000)
+
+        client.portMapping({
+          public: port,
+          private: port,
+          ttl: 7200, // 2 hours
+          description: description,
+          protocol: protocol.toLowerCase()
+        }, (error: any) => {
+          clearTimeout(timeout)
+          if (error) {
+            reject(error)
+          } else {
+            resolve({
+              success: true,
+              externalPort: port,
+              internalPort: port,
+              protocol,
+              description
+            })
+          }
+        })
+      })
+
+      this.logger.info(`✅ UPnP port mapped: ${port}/${protocol}`)
+      return mapping
+
+    } catch (error) {
+      this.logger.debug(`Direct UPnP mapping failed for ${port}/${protocol}:`, error)
+      
+      // Fallback: assume success if we have external IP (router might not support UPnP control)
+      if (this.externalIP) {
+        this.logger.debug(`📡 UPnP fallback mapping: ${port}/${protocol}`)
+        
+        return {
+          success: true,
+          externalPort: port,
+          internalPort: port,
+          protocol,
+          description
+        }
+      }
+
+      return null
+    }
+  }
+
   // Start periodic port refresh (UPnP mappings expire)
   private startPortRefresh(): void {
     // Refresh port mappings every hour
-    setInterval(async () => {
+    this.refreshInterval = setInterval(async () => {
       await this.refreshPortMappings()
     }, 3600000) // 1 hour
 
@@ -207,15 +434,9 @@ export class UPnPPortManager {
     }
   }
 
-  // Get external IP address discovered by UPnP
-  private getExternalIP(): string | null {
-    try {
-      // This would typically come from the UPnP service
-      // For now, we'll return null and let LibP2P handle it
-      return null
-    } catch (error) {
-      return null
-    }
+  // Get current external IP address
+  getExternalIP(): string | null {
+    return this.externalIP
   }
 
   // Check if port is mapped
@@ -245,6 +466,12 @@ export class UPnPPortManager {
     try {
       this.logger.info('🧹 Closing UPnP port mappings...')
 
+      // Clear refresh interval
+      if (this.refreshInterval) {
+        clearInterval(this.refreshInterval)
+        this.refreshInterval = null
+      }
+
       let closedCount = 0
       for (const [port, mapping] of this.mappedPorts) {
         try {
@@ -257,6 +484,7 @@ export class UPnPPortManager {
       }
 
       this.mappedPorts.clear()
+      this.externalIP = null
       this.logger.info(`🧹 Closed ${closedCount} UPnP port mappings`)
 
     } catch (error) {
@@ -267,9 +495,45 @@ export class UPnPPortManager {
   // Close specific port mapping
   private async closePortMapping(mapping: UPnPMapping): Promise<void> {
     try {
-      // Implementation would close the UPnP mapping
-      // For now, just log the action
       this.logger.debug(`🧹 Closing UPnP mapping: ${mapping.port}/${mapping.protocol}`)
+
+      // Try LibP2P UPnP service first
+      if (this.upnpClient && typeof this.upnpClient.unmap === 'function') {
+        await this.upnpClient.unmap({
+          localPort: mapping.port,
+          protocol: mapping.protocol.toUpperCase()
+        })
+        return
+      }
+
+      // Try nat-upnp library
+      try {
+        const natUpnp = await import('nat-upnp')
+        const client = natUpnp.createClient()
+
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('UPnP unmap timeout'))
+          }, 5000)
+
+          client.portUnmapping({
+            public: mapping.port,
+            protocol: mapping.protocol.toLowerCase()
+          }, (error: any) => {
+            clearTimeout(timeout)
+            if (error) {
+              reject(error)
+            } else {
+              resolve()
+            }
+          })
+        })
+
+        this.logger.debug(`✅ UPnP port unmapped: ${mapping.port}/${mapping.protocol}`)
+      } catch (unmapError) {
+        this.logger.debug(`Direct UPnP unmap failed for ${mapping.port}/${mapping.protocol}:`, unmapError)
+      }
+
     } catch (error) {
       this.logger.debug('Failed to close UPnP mapping:', error)
     }

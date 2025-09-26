@@ -76,13 +76,29 @@ export class PeerConnectionCapabilities {
                !addrStr.includes('172.3')
       })
 
-      if (externalAddresses.length > 0) {
+      // Also check UPnP port manager for external IP
+      const upnpExternalIP = this.digNode.upnpPortManager?.getExternalIP()
+      const hasUPnPMapping = upnpExternalIP && this.digNode.upnpPortManager?.mappedPorts?.size > 0
+
+      if (externalAddresses.length > 0 || hasUPnPMapping) {
         capabilities.acceptsDirectConnections = true
         capabilities.canActAsTurnServer = true
         capabilities.externalAddresses = externalAddresses.map((addr: any) => addr.toString())
+        
+        // Add UPnP external addresses if available
+        if (hasUPnPMapping) {
+          const upnpAddresses = this.digNode.upnpPortManager.getExternalAddresses()
+          capabilities.externalAddresses.push(...upnpAddresses)
+        }
+        
         capabilities.connectionTypes.push('direct-tcp', 'direct-websocket')
         
-        this.logger.info('✅ Node accepts direct connections - can act as TURN server')
+        const connectionMethod = hasUPnPMapping ? 'UPnP + Direct' : 'Direct'
+        this.logger.info(`✅ Node accepts direct connections (${connectionMethod}) - can act as TURN server`)
+        
+        if (hasUPnPMapping) {
+          this.logger.info(`🌐 UPnP external IP: ${upnpExternalIP}`)
+        }
       } else {
         this.logger.info('🔒 Node behind NAT - needs TURN relay for incoming connections')
       }

@@ -79,6 +79,10 @@ export declare class DIGNode {
     connectToPeer(peerAddress: string): Promise<void>;
     connectToLocalPeer(ipAddress: string, port?: number): Promise<boolean>;
     getConnectionInfo(): any;
+    getNodeCapabilities(): NodeCapabilities;
+    getUPnPStatus(): any;
+    getMultiaddrs(): any[];
+    private getAvailableConnectionMethods;
     discoverAllPeers(): Promise<void>;
     forceConnectToPeers(): Promise<void>;
     stop(): Promise<void>;
