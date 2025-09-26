@@ -13,6 +13,7 @@
     "bootstrap:prod": "NODE_ENV=production node dist/examples/dedicated-bootstrap.js",
     "dev": "tsx examples/unified-dig-node.ts",
     "unified": "tsx examples/unified-dig-node.ts",
+    "simple": "node -e \"import('./dist/src/node2/SimpleDIGNode.js').then(({ SimpleDIGNode }) => { const node = new SimpleDIGNode(16002); node.start().then(() => { console.log('🚀 LOCAL STARTED'); setInterval(() => { const s = node.getStatus(); const digPeers = node.getDIGPeers(); console.log('📊 LOCAL:', s.connectedPeers, 'peers,', s.digPeers, 'DIG peers,', s.storeCount, 'stores'); if (digPeers.length > 0) { console.log('🎉 LOCAL: Found DIG peers!'); digPeers.forEach(peer => console.log('  🔗', peer.peerId.substring(0, 20) + '... (' + peer.stores.length + ' stores)')); } }, 15000); }); });\"",
     "hotel-test": "tsx examples/hotel-network-test.ts",
     "connect-local": "tsx examples/connect-local-dig-peers.ts",
     "gateway": "tsx examples/gateway-server.ts",
