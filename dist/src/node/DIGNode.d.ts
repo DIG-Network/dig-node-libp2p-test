@@ -59,11 +59,14 @@ export declare class DIGNode {
     private handleDIGNetworkIdentification;
     private handleDIGMembershipVerification;
     private handleGetPeerInfo;
+    private handleTurnCoordinationRequest;
+    private handleTurnRelayData;
     private getConnectionCapabilitiesResponse;
     private startWebSocketRelay;
     private startPeerEventHandling;
     private startStoreSync;
     private syncStores;
+    private syncStoresFromBootstrapPeers;
     private ensureDigDirectory;
     private scanDIGFiles;
     private loadDIGFile;
@@ -85,6 +88,10 @@ export declare class DIGNode {
     getNetworkHealth(): any;
     downloadStore(storeId: string): Promise<boolean>;
     private downloadViaDirectConnection;
+    private downloadViaPeerTURNCoordination;
+    private downloadViaTurnRelay;
+    private downloadViaAWSBootstrapTurnRelay;
+    private downloadViaPeerTurnRelay;
     private downloadViaAWSBootstrapTURN;
     hasStore(storeId: string): boolean;
     findStorePeers(storeId: string): Promise<any[]>;

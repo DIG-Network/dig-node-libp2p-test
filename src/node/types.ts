@@ -91,7 +91,7 @@ export enum CapabilityCode {
 }
 
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES' | 'GET_PEER_INFO';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES' | 'GET_PEER_INFO' | 'TURN_COORDINATION_REQUEST' | 'TURN_RELAY_DATA';
   storeId?: string;
   filePath?: string;
   urn?: string;
@@ -118,6 +118,11 @@ export interface DIGRequest {
   networkId?: string;
   isDIGNode?: boolean;
   requestedInfo?: string[];
+  // TURN coordination fields
+  fromPeerId?: string;
+  targetPeerId?: string;
+  sessionId?: string;
+  timestamp?: number;
 }
 
 export interface DIGResponse {
@@ -151,6 +156,13 @@ export interface DIGResponse {
   cryptoIPv6?: string;
   stores?: string[];
   nodeType?: string;
+  // TURN coordination response fields
+  sessionId?: string;
+  turnServerPeerId?: string;
+  externalAddress?: string;
+  relayPort?: number;
+  data?: string;
+  message?: string;
 }
 
 export interface DIGPeer {

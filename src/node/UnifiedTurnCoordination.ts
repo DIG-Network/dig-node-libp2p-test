@@ -15,7 +15,7 @@ export class UnifiedTurnCoordination {
   private logger = new Logger('TurnCoordination')
   private digNode: any
   private turnServers = new Map<string, TurnServerInfo>()
-  private activeConnections = new Map<string, any>()
+  public activeConnections = new Map<string, any>()
 
   constructor(digNode: any) {
     this.digNode = digNode
@@ -331,24 +331,160 @@ export class UnifiedTurnCoordination {
     }
   }
 
-  // Establish TURN relay connection (for ComprehensiveNATTraversal)
-  async establishTurnRelay(targetPeerId: string): Promise<any> {
+  // Coordinate TURN connection between NAT-restricted peers
+  async coordinateTurnConnection(targetPeerId: string, storeId?: string): Promise<any> {
     try {
       const turnServer = this.getBestTurnServer()
       if (!turnServer) {
-        throw new Error('No TURN servers available')
+        this.logger.warn('❌ No TURN servers available for coordination')
+        return null
       }
 
-      this.logger.info(`📡 Establishing TURN relay to ${targetPeerId} via ${turnServer.peerId}`)
+      this.logger.info(`📡 Coordinating TURN connection to ${targetPeerId} via ${turnServer.peerId}`)
 
-      // Implementation would establish the TURN relay connection
-      // For now, return a mock connection object
+      // Step 1: Signal both peers to connect to the TURN server
+      const coordinationResult = await this.signalTurnConnection(turnServer, targetPeerId, storeId)
       
-      return {
-        remotePeer: { toString: () => targetPeerId },
-        isRelay: true,
-        turnServer: turnServer.peerId
+      if (coordinationResult.success) {
+        this.logger.info(`✅ TURN coordination successful: ${coordinationResult.method}`)
+        return coordinationResult
+      } else {
+        this.logger.warn(`⚠️ TURN coordination failed: ${coordinationResult.error}`)
+        return null
       }
+
+    } catch (error) {
+      this.logger.error(`Failed to coordinate TURN connection to ${targetPeerId}:`, error)
+      return null
+    }
+  }
+
+  // Signal TURN connection to both peers
+  private async signalTurnConnection(turnServer: TurnServerInfo, targetPeerId: string, storeId?: string): Promise<any> {
+    try {
+      if (turnServer.type === 'bootstrap') {
+        // Use AWS bootstrap server for TURN coordination
+        return await this.coordinateViaTurnBootstrap(turnServer, targetPeerId, storeId)
+      } else {
+        // Use peer TURN server for coordination
+        return await this.coordinateViaPeerTurn(turnServer, targetPeerId, storeId)
+      }
+    } catch (error) {
+      this.logger.error('TURN signaling failed:', error)
+      return { success: false, error: 'TURN signaling failed' }
+    }
+  }
+
+  // Coordinate via AWS bootstrap TURN server
+  private async coordinateViaTurnBootstrap(turnServer: TurnServerInfo, targetPeerId: string, storeId?: string): Promise<any> {
+    try {
+      this.logger.info(`📡 Using AWS bootstrap TURN coordination for ${targetPeerId}`)
+
+      // Request TURN coordination via AWS bootstrap
+      const coordinationRequest = {
+        fromPeerId: this.digNode.node.peerId.toString(),
+        toPeerId: targetPeerId,
+        storeId,
+        method: 'turn-coordination',
+        userTier: process.env.DIG_USER_TIER || 'free',
+        isPremium: process.env.DIG_IS_PREMIUM === 'true'
+      }
+
+      const response = await fetch(`${turnServer.url}/relay-store`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(coordinationRequest)
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        return {
+          success: true,
+          method: 'aws-bootstrap-turn',
+          turnServer: turnServer.peerId,
+          coordination: result
+        }
+      } else {
+        return {
+          success: false,
+          error: `AWS bootstrap TURN coordination failed: ${response.status}`
+        }
+      }
+
+    } catch (error) {
+      return {
+        success: false,
+        error: `AWS bootstrap TURN coordination error: ${error}`
+      }
+    }
+  }
+
+  // Coordinate via peer TURN server
+  private async coordinateViaPeerTurn(turnServer: TurnServerInfo, targetPeerId: string, storeId?: string): Promise<any> {
+    try {
+      this.logger.info(`📡 Using peer TURN coordination: ${turnServer.peerId} for ${targetPeerId}`)
+
+      // For peer TURN servers, we need to:
+      // 1. Connect to the TURN server peer
+      // 2. Request it to coordinate connection with target peer
+      // 3. Handle the relay setup
+
+      // Try to connect to TURN server peer first
+      let turnConnection = null
+      
+      if (turnServer.addresses) {
+        for (const address of turnServer.addresses) {
+          try {
+            await this.digNode.node.dial(address)
+            this.logger.info(`✅ Connected to peer TURN server: ${turnServer.peerId}`)
+            turnConnection = address
+            break
+          } catch (dialError) {
+            this.logger.debug(`Failed to dial TURN server ${address}:`, dialError)
+          }
+        }
+      }
+
+      if (!turnConnection) {
+        return {
+          success: false,
+          error: 'Could not connect to peer TURN server'
+        }
+      }
+
+      // Request TURN coordination via DIG protocol
+      const stream = await this.digNode.node.dialProtocol(turnServer.peerId, '/dig/1.0.0')
+      
+      const coordinationRequest = {
+        type: 'TURN_COORDINATION_REQUEST',
+        fromPeerId: this.digNode.node.peerId.toString(),
+        targetPeerId,
+        storeId,
+        timestamp: Date.now()
+      }
+
+      await this.digNode.sendStreamMessage(stream, coordinationRequest)
+      await stream.close()
+
+      return {
+        success: true,
+        method: 'peer-turn',
+        turnServer: turnServer.peerId,
+        connection: turnConnection
+      }
+
+    } catch (error) {
+      return {
+        success: false,
+        error: `Peer TURN coordination error: ${error}`
+      }
+    }
+  }
+
+  // Establish TURN relay connection (for ComprehensiveNATTraversal)
+  async establishTurnRelay(targetPeerId: string): Promise<any> {
+    try {
+      return await this.coordinateTurnConnection(targetPeerId)
     } catch (error) {
       this.logger.error(`Failed to establish TURN relay to ${targetPeerId}:`, error)
       return null

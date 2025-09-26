@@ -357,11 +357,16 @@ export class DIGNode {
       const registered = await this.useAWSBootstrapFallback()
       
       if (registered) {
-        // 2. Always discover peers from AWS bootstrap to find other DIG nodes
-        this.logger.info(`🔍 Discovering DIG peers from AWS bootstrap...`)
-        await this.discoverPeersFromAWSBootstrap()
+         // 2. Always discover peers from AWS bootstrap to find other DIG nodes
+         this.logger.info(`🔍 Discovering DIG peers from AWS bootstrap...`)
+         await this.discoverPeersFromAWSBootstrap()
 
-        // 3. Set up intelligent periodic heartbeat system (every 2 minutes)
+         // 2.5. Trigger immediate store synchronization with discovered peers
+         setTimeout(async () => {
+           await this.syncStoresFromBootstrapPeers()
+         }, 5000) // Wait 5 seconds for connections to establish
+
+         // 3. Set up intelligent periodic heartbeat system (every 2 minutes)
         let consecutiveFailures = 0
         const maxFailures = 3
         
@@ -769,6 +774,12 @@ export class DIGNode {
             } else if (request.type === 'GET_PEER_INFO') {
               const peerInfoResponse = self.handleGetPeerInfo(request)
               yield uint8ArrayFromString(JSON.stringify(peerInfoResponse))
+            } else if (request.type === 'TURN_COORDINATION_REQUEST') {
+              const turnResponse = await self.handleTurnCoordinationRequest(request)
+              yield uint8ArrayFromString(JSON.stringify(turnResponse))
+            } else if (request.type === 'TURN_RELAY_DATA') {
+              const relayResponse = await self.handleTurnRelayData(request)
+              yield uint8ArrayFromString(JSON.stringify(relayResponse))
             }
             break
           }
@@ -977,6 +988,104 @@ export class DIGNode {
     return response
   }
 
+  // Handle TURN coordination requests (when acting as TURN server)
+  private async handleTurnCoordinationRequest(request: DIGRequest): Promise<DIGResponse> {
+    try {
+      this.logger.info(`📡 TURN coordination request: ${request.fromPeerId} → ${request.targetPeerId} for store ${request.storeId}`)
+
+      // Check if we can act as TURN server
+      if (!this.nodeCapabilities.turnServer) {
+        return {
+          success: false,
+          error: 'This node cannot act as TURN server'
+        }
+      }
+
+      // Check if we have the requested store to relay
+      if (request.storeId && !this.digFiles.has(request.storeId)) {
+        return {
+          success: false,
+          error: `Store ${request.storeId} not available for relay`
+        }
+      }
+
+      // Create TURN relay session
+      const sessionId = `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      
+      // Store the relay session for coordination
+      this.turnCoordination.activeConnections.set(sessionId, {
+        fromPeerId: request.fromPeerId,
+        targetPeerId: request.targetPeerId,
+        storeId: request.storeId,
+        sessionId,
+        status: 'coordinating',
+        created: Date.now()
+      })
+
+      this.logger.info(`✅ TURN relay session created: ${sessionId}`)
+
+      return {
+        success: true,
+        sessionId,
+        turnServerPeerId: this.node.peerId.toString(),
+        externalAddress: this.upnpPortManager?.getExternalIP() || undefined,
+        relayPort: (this.config.port || 4001) + 2000, // TURN relay port
+        message: 'TURN relay session established'
+      }
+
+    } catch (error) {
+      this.logger.error('TURN coordination request failed:', error)
+      return {
+        success: false,
+        error: `TURN coordination failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }
+    }
+  }
+
+  // Handle TURN relay data transfer
+  private async handleTurnRelayData(request: DIGRequest): Promise<DIGResponse> {
+    try {
+      this.logger.info(`📡 TURN relay data request: session ${request.sessionId}`)
+
+      // Find the relay session
+      const session = this.turnCoordination.activeConnections.get(request.sessionId || '')
+      
+      if (!session) {
+        return {
+          success: false,
+          error: 'TURN relay session not found'
+        }
+      }
+
+      // If this is a store request, serve the file
+      if (request.storeId && this.digFiles.has(request.storeId)) {
+        const digFile = this.digFiles.get(request.storeId)!
+        
+        this.logger.info(`📡 Serving store ${request.storeId} via TURN relay`)
+        
+        return {
+          success: true,
+          storeId: request.storeId,
+          size: digFile.content.length,
+          data: digFile.content.toString('base64'), // Base64 encode for JSON transport
+          sessionId: request.sessionId
+        }
+      }
+
+      return {
+        success: false,
+        error: 'Store not available for TURN relay'
+      }
+
+    } catch (error) {
+      this.logger.error('TURN relay data failed:', error)
+      return {
+        success: false,
+        error: `TURN relay data failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }
+    }
+  }
+
   // Get connection capabilities response
   private getConnectionCapabilitiesResponse(): DIGResponse {
     return {
@@ -1077,11 +1186,74 @@ export class DIGNode {
       }
     } catch (error) {
       this.logger.error('Store sync failed:', error)
-    }
-  }
+     }
+   }
 
-  // File management methods
-  private async ensureDigDirectory(): Promise<boolean> {
+   // Sync stores from peers discovered via AWS bootstrap
+   private async syncStoresFromBootstrapPeers(): Promise<void> {
+     try {
+       this.logger.info('🔄 Starting store sync from AWS bootstrap discovered peers...')
+
+       const awsConfig = this.getAWSBootstrapConfig()
+       if (!awsConfig.enabled) return
+
+       // Get all peers with stores from AWS bootstrap
+       const response = await fetch(`${awsConfig.url}/peers?includeStores=true`)
+       if (!response.ok) return
+
+       const result = await response.json()
+       const peersWithStores = result.peers?.filter((peer: any) => 
+         peer.stores?.length > 0 && peer.peerId !== this.node.peerId.toString()
+       ) || []
+
+       if (peersWithStores.length === 0) {
+         this.logger.info('📋 No peers with stores found for synchronization')
+         return
+       }
+
+       this.logger.info(`📋 Found ${peersWithStores.length} peers with stores for synchronization`)
+
+       // Collect all unique stores we don't have
+       const allRemoteStores = new Set<string>()
+       for (const peer of peersWithStores) {
+         for (const storeId of peer.stores) {
+           if (!this.digFiles.has(storeId)) {
+             allRemoteStores.add(storeId)
+           }
+         }
+       }
+
+       if (allRemoteStores.size > 0) {
+         this.logger.info(`📥 Attempting to sync ${allRemoteStores.size} missing stores`)
+
+         // Download missing stores (limit concurrent downloads)
+         const storesToSync = Array.from(allRemoteStores).slice(0, 10)
+         
+         for (const storeId of storesToSync) {
+           try {
+             this.logger.info(`📥 Syncing store: ${storeId}`)
+             const success = await this.downloadStore(storeId)
+             
+             if (success) {
+               this.logger.info(`✅ Successfully synced store: ${storeId}`)
+             } else {
+               this.logger.warn(`⚠️ Failed to sync store: ${storeId}`)
+             }
+           } catch (error) {
+             this.logger.debug(`Store sync failed for ${storeId}:`, error)
+           }
+         }
+       } else {
+         this.logger.info('✅ All stores already synchronized')
+       }
+
+     } catch (error) {
+       this.logger.error('Bootstrap store sync failed:', error)
+     }
+   }
+
+   // File management methods
+   private async ensureDigDirectory(): Promise<boolean> {
     try {
       await import('fs/promises').then(fs => fs.access(this.digPath))
       return true
@@ -1383,11 +1555,140 @@ export class DIGNode {
         }
       }
 
-      // Fallback to AWS bootstrap TURN relay if direct HTTP fails
-      return await this.downloadViaAWSBootstrapTURN(storeId)
+      // Fallback to peer TURN coordination if direct HTTP fails
+      return await this.downloadViaPeerTURNCoordination(storeId)
 
     } catch (error) {
       this.logger.debug('Direct connection download failed:', error)
+      return null
+    }
+  }
+
+  // Download via peer TURN coordination
+  private async downloadViaPeerTURNCoordination(storeId: string): Promise<Buffer | null> {
+    try {
+      const awsConfig = this.getAWSBootstrapConfig()
+      
+      if (!awsConfig.enabled) {
+        return null
+      }
+
+      // Find peers with this store
+      const response = await fetch(`${awsConfig.url}/peers?includeStores=true`)
+      
+      if (!response.ok) {
+        return null
+      }
+
+      const result = await response.json()
+      const peersWithStore = result.peers?.filter((peer: any) => 
+        peer.stores?.includes(storeId) && peer.peerId !== this.node.peerId.toString()
+      ) || []
+
+      if (peersWithStore.length === 0) {
+        this.logger.warn(`⚠️ No peers found with store ${storeId}`)
+        return null
+      }
+
+      const sourcePeer = peersWithStore[0]
+      this.logger.info(`📡 Attempting TURN coordination for ${storeId} from ${sourcePeer.peerId}`)
+
+      // Use TURN coordination to establish connection
+      const turnResult = await this.turnCoordination.coordinateTurnConnection(sourcePeer.peerId, storeId)
+      
+      if (turnResult && turnResult.success) {
+        this.logger.info(`✅ TURN coordination established: ${turnResult.method}`)
+        
+        // Attempt to download via the coordinated TURN connection
+        return await this.downloadViaTurnRelay(sourcePeer.peerId, storeId, turnResult)
+      }
+
+      // Final fallback to AWS bootstrap TURN relay
+      return await this.downloadViaAWSBootstrapTURN(storeId)
+
+    } catch (error) {
+      this.logger.debug('Peer TURN coordination failed:', error)
+      return null
+    }
+  }
+
+  // Download via coordinated TURN relay
+  private async downloadViaTurnRelay(sourcePeerId: string, storeId: string, turnResult: any): Promise<Buffer | null> {
+    try {
+      this.logger.info(`📡 Downloading ${storeId} via TURN relay from ${sourcePeerId}`)
+
+      if (turnResult.method === 'aws-bootstrap-turn') {
+        // Use AWS bootstrap TURN relay
+        return await this.downloadViaAWSBootstrapTurnRelay(sourcePeerId, storeId, turnResult)
+      } else if (turnResult.method === 'peer-turn') {
+        // Use peer TURN relay
+        return await this.downloadViaPeerTurnRelay(sourcePeerId, storeId, turnResult)
+      }
+
+      return null
+
+    } catch (error) {
+      this.logger.error('TURN relay download failed:', error)
+      return null
+    }
+  }
+
+  // Download via AWS bootstrap TURN relay
+  private async downloadViaAWSBootstrapTurnRelay(sourcePeerId: string, storeId: string, turnResult: any): Promise<Buffer | null> {
+    try {
+      // Request the file via AWS bootstrap TURN relay
+      const relayResponse = await fetch(`${turnResult.coordination.fallbackTurnServer?.relayEndpoint || '/bootstrap-turn-relay'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeId,
+          fromPeerId: sourcePeerId,
+          toPeerId: this.node.peerId.toString()
+        })
+      })
+
+      if (relayResponse.ok) {
+        const data = await relayResponse.arrayBuffer()
+        this.logger.info(`✅ AWS bootstrap TURN relay download: ${data.byteLength} bytes`)
+        return Buffer.from(data)
+      }
+
+      return null
+
+    } catch (error) {
+      this.logger.debug('AWS bootstrap TURN relay download failed:', error)
+      return null
+    }
+  }
+
+  // Download via peer TURN relay
+  private async downloadViaPeerTurnRelay(sourcePeerId: string, storeId: string, turnResult: any): Promise<Buffer | null> {
+    try {
+      // Connect to the TURN server and request relay
+      const stream = await this.node.dialProtocol(turnResult.turnServer, '/dig/1.0.0')
+      
+      const relayRequest = {
+        type: 'TURN_RELAY_DATA',
+        sessionId: turnResult.sessionId,
+        storeId,
+        fromPeerId: sourcePeerId,
+        toPeerId: this.node.peerId.toString()
+      }
+
+      const response = await this.sendStreamMessage(stream, relayRequest)
+      await stream.close()
+
+      if (response && response.success && response.data) {
+        // Decode base64 data
+        const data = Buffer.from(response.data, 'base64')
+        this.logger.info(`✅ Peer TURN relay download: ${data.length} bytes`)
+        return data
+      }
+
+      return null
+
+    } catch (error) {
+      this.logger.debug('Peer TURN relay download failed:', error)
       return null
     }
   }
