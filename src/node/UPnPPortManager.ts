@@ -14,6 +14,7 @@
 
 import { Logger } from './logger.js'
 import { multiaddr } from '@multiformats/multiaddr'
+import { DynamicFirewallManager } from './DynamicFirewallManager.js'
 
 export class UPnPPortManager {
   private logger = new Logger('UPnPPortManager')
@@ -22,6 +23,7 @@ export class UPnPPortManager {
   private upnpClient: any = null
   private externalIP: string | null = null
   private refreshInterval: NodeJS.Timeout | null = null
+  private firewallManager = new DynamicFirewallManager()
 
   constructor(digNode: any) {
     this.digNode = digNode
@@ -31,6 +33,9 @@ export class UPnPPortManager {
   async initialize(): Promise<void> {
     try {
       this.logger.info('🔧 Initializing UPnP port management...')
+
+      // Initialize dynamic firewall management
+      await this.firewallManager.initialize()
 
       // Get UPnP service from LibP2P
       this.upnpClient = this.digNode.node.services.upnp
@@ -81,39 +86,35 @@ export class UPnPPortManager {
   // Open all required ports for DIG node operation using UPnP-safe ports
   private async openRequiredPorts(): Promise<void> {
     try {
-      // Use standard "safe" ports that UPnP routers typically allow
-      const SAFE_PORTS = {
-        HTTP: 8080,        // Standard HTTP alternate (universally allowed)
-        WEBSOCKET: 8081,   // WebSocket (commonly allowed)
-        LIBP2P: 8082,      // LibP2P main (safe range)
-        TURN: 3478         // Standard TURN/STUN port (RFC 5766)
-      }
+      // Use Google Nest WiFi safe ports (researched best practices)
+      const SAFE_PORTS = this.firewallManager.getGoogleWiFiSafePorts()
 
-      this.logger.info('🔒 Using UPnP-safe port configuration for Google Nest WiFi compatibility')
+      this.logger.info('🔒 Using Google Nest WiFi safe port configuration (researched best practices)')
 
       // 1. HTTP Download Server (Port 8080 - Universal HTTP alternate)
       const httpPort = SAFE_PORTS.HTTP
       await this.openPortWithConflictResolution(httpPort, 'tcp', 'DIG-HTTP-Download')
-      await this.openWindowsFirewall(httpPort, 'DIG-HTTP-Download')
+      await this.firewallManager.openPort(httpPort, 'tcp', 'HTTP-Download')
       this.logger.info(`📁 HTTP Download: Port ${httpPort} (standard HTTP alternate)`)
 
       // 2. WebSocket Port (Port 8081 - Commonly allowed)
       const wsPort = SAFE_PORTS.WEBSOCKET
       await this.openPortWithConflictResolution(wsPort, 'tcp', 'DIG-WebSocket')
-      await this.openWindowsFirewall(wsPort, 'DIG-WebSocket')
+      await this.firewallManager.openPort(wsPort, 'tcp', 'WebSocket')
       this.logger.info(`🌐 WebSocket: Port ${wsPort} (standard WebSocket)`)
 
       // 3. LibP2P Main Port (Port 8082 - Safe range)
       const libp2pPort = SAFE_PORTS.LIBP2P
       await this.openPortWithConflictResolution(libp2pPort, 'tcp', 'DIG-LibP2P-Main')
-      await this.openWindowsFirewall(libp2pPort, 'DIG-LibP2P-Main')
+      await this.firewallManager.openPort(libp2pPort, 'tcp', 'LibP2P-Main')
       this.logger.info(`🔗 LibP2P: Port ${libp2pPort} (safe P2P range)`)
 
       // 4. TURN Server Port (Port 3478 - RFC standard, universally allowed)
       const turnPort = SAFE_PORTS.TURN
       await this.openPortWithConflictResolution(turnPort, 'tcp', 'DIG-TURN-TCP')
       await this.openPortWithConflictResolution(turnPort, 'udp', 'DIG-TURN-UDP')
-      await this.openWindowsFirewall(turnPort, 'DIG-TURN')
+      await this.firewallManager.openPort(turnPort, 'tcp', 'TURN-TCP')
+      await this.firewallManager.openPort(turnPort, 'udp', 'TURN-UDP')
       this.logger.info(`📡 TURN: Port ${turnPort} (RFC 5766 standard)`)
 
       // Update DIG node configuration with safe ports
@@ -561,15 +562,14 @@ export class UPnPPortManager {
         this.refreshInterval = null
       }
 
+      // Close all firewall rules first
+      await this.firewallManager.closeAllPorts()
+
       let closedCount = 0
       for (const [port, mapping] of this.mappedPorts) {
         try {
           // Close the port mapping
           await this.closePortMapping(mapping)
-          
-          // Close Windows firewall rules
-          await this.closeWindowsFirewall(port, mapping.description)
-          
           closedCount++
         } catch (error) {
           this.logger.debug(`Failed to close UPnP mapping for port ${port}:`, error)
