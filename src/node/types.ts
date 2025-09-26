@@ -91,7 +91,7 @@ export enum CapabilityCode {
 }
 
 export interface DIGRequest {
-  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES' | 'GET_PEER_INFO' | 'TURN_COORDINATION_REQUEST' | 'TURN_RELAY_DATA';
+  type: 'GET_FILE' | 'GET_URN' | 'GET_STORE_FILES' | 'GET_STORE_CONTENT' | 'GET_FILE_RANGE' | 'HANDSHAKE' | 'PEER_EXCHANGE' | 'PRIVACY_PEER_DISCOVERY' | 'QUERY_STORE_LOCATION' | 'DIG_NETWORK_IDENTIFICATION' | 'VERIFY_DIG_MEMBERSHIP' | 'GET_CONNECTION_CAPABILITIES' | 'GET_PEER_INFO' | 'TURN_COORDINATION_REQUEST' | 'TURN_RELAY_DATA' | 'TURN_CONNECTION_SIGNAL';
   storeId?: string;
   filePath?: string;
   urn?: string;
@@ -123,6 +123,9 @@ export interface DIGRequest {
   targetPeerId?: string;
   sessionId?: string;
   timestamp?: number;
+  turnServerPeerId?: string;
+  turnServerAddresses?: string[];
+  websocketEstablished?: boolean;
 }
 
 export interface DIGResponse {

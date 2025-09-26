@@ -672,6 +672,10 @@ export class DIGNode {
                         const relayResponse = await self.handleTurnRelayData(request);
                         yield uint8ArrayFromString(JSON.stringify(relayResponse));
                     }
+                    else if (request.type === 'TURN_CONNECTION_SIGNAL') {
+                        const signalResponse = await self.handleTurnConnectionSignal(request);
+                        yield uint8ArrayFromString(JSON.stringify(signalResponse));
+                    }
                     break;
                 }
             }, stream);
@@ -929,6 +933,66 @@ export class DIGNode {
             return {
                 success: false,
                 error: `TURN relay data failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+            };
+        }
+    }
+    // Handle TURN connection signals (when another peer wants us to connect to a TURN server)
+    async handleTurnConnectionSignal(request) {
+        try {
+            this.logger.info(`📡 TURN connection signal received from ${request.fromPeerId}`);
+            const turnServerPeerId = request.turnServerPeerId;
+            const turnServerAddresses = request.turnServerAddresses;
+            if (!turnServerPeerId || !turnServerAddresses) {
+                return {
+                    success: false,
+                    error: 'Missing TURN server information in signal'
+                };
+            }
+            // Establish connection to the specified TURN server
+            let connected = false;
+            for (const address of turnServerAddresses) {
+                try {
+                    this.logger.info(`🔌 Connecting to signaled TURN server: ${address}`);
+                    const addr = multiaddr(address);
+                    await this.node.dial(addr);
+                    this.logger.info(`✅ Connected to TURN server: ${turnServerPeerId}`);
+                    connected = true;
+                    break;
+                }
+                catch (dialError) {
+                    this.logger.debug(`Failed to connect to TURN server ${address}:`, dialError);
+                }
+            }
+            if (connected) {
+                // Establish WebSocket to TURN server for coordination
+                const match = turnServerAddresses[0].match(/\/ip4\/([^\/]+)\/tcp\/(\d+)/);
+                if (match) {
+                    const [, ip, port] = match;
+                    const wsPort = parseInt(port) + 2000;
+                    const wsUrl = `ws://${ip}:${wsPort}`;
+                    this.logger.info(`🔌 Establishing WebSocket for TURN coordination: ${wsUrl}`);
+                    // Store the WebSocket connection for TURN coordination
+                    // In full implementation, would establish actual WebSocket
+                }
+                return {
+                    success: true,
+                    message: `Connected to TURN server ${turnServerPeerId}`,
+                    turnServerPeerId,
+                    timestamp: Date.now()
+                };
+            }
+            else {
+                return {
+                    success: false,
+                    error: `Could not connect to TURN server ${turnServerPeerId}`
+                };
+            }
+        }
+        catch (error) {
+            this.logger.error('TURN connection signal handling failed:', error);
+            return {
+                success: false,
+                error: `TURN signal handling failed: ${error instanceof Error ? error.message : 'Unknown error'}`
             };
         }
     }

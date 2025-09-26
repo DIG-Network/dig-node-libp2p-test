@@ -62,6 +62,7 @@ export declare class DIGNode {
     private handleGetPeerInfo;
     private handleTurnCoordinationRequest;
     private handleTurnRelayData;
+    private handleTurnConnectionSignal;
     private getConnectionCapabilitiesResponse;
     private startWebSocketRelay;
     private startPeerEventHandling;

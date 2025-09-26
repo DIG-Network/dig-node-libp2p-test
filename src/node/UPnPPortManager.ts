@@ -67,6 +67,9 @@ export class UPnPPortManager {
       // Mark UPnP as working
       this.digNode.nodeCapabilities.upnp = true
 
+      // Verify external accessibility after UPnP + firewall setup
+      await this.verifyExternalAccessibility()
+      
       this.logger.info('✅ UPnP port management initialized successfully')
 
     } catch (error) {
@@ -84,13 +87,18 @@ export class UPnPPortManager {
 
       // 1. Open main LibP2P port (TCP) with conflict resolution
       const actualMainPort = await this.openPortWithConflictResolution(mainPort, 'tcp', 'DIG-LibP2P-Main')
+      await this.openWindowsFirewall(actualMainPort, 'DIG-LibP2P-Main')
 
       // 2. Open WebSocket port for NAT traversal (use next available port after main)
       const actualWsPort = await this.openPortWithConflictResolution(actualMainPort + 1, 'tcp', 'DIG-WebSocket-NAT')
+      await this.openWindowsFirewall(actualWsPort, 'DIG-WebSocket-NAT')
 
       // 3. Open HTTP download port for direct file access (CRITICAL FIX)
       const httpPort = actualMainPort + 1000
       await this.openPortWithConflictResolution(httpPort, 'tcp', 'DIG-HTTP-Download')
+      
+      // 4. Open Windows firewall for HTTP download port
+      await this.openWindowsFirewall(httpPort, 'DIG-HTTP-Download')
 
       // Update the DIG node's port configuration with actual allocated ports
       this.digNode.config.port = actualMainPort
@@ -543,6 +551,10 @@ export class UPnPPortManager {
         try {
           // Close the port mapping
           await this.closePortMapping(mapping)
+          
+          // Close Windows firewall rules
+          await this.closeWindowsFirewall(port, mapping.description)
+          
           closedCount++
         } catch (error) {
           this.logger.debug(`Failed to close UPnP mapping for port ${port}:`, error)
@@ -643,6 +655,126 @@ export class UPnPPortManager {
     } catch (error) {
       this.logger.debug(`UPnP conflict check failed for ${port}/${protocol}:`, error)
       return false // Assume no conflict if we can't check
+    }
+  }
+
+  // Open Windows firewall for specific port
+  private async openWindowsFirewall(port: number, description: string): Promise<void> {
+    try {
+      this.logger.info(`🔥 Opening Windows firewall for port ${port}...`)
+
+      const { exec } = await import('child_process')
+      const { promisify } = await import('util')
+      const execAsync = promisify(exec)
+
+      // Check if Windows (skip on Linux/Mac)
+      if (process.platform !== 'win32') {
+        this.logger.debug('⏭️ Not Windows - skipping firewall configuration')
+        return
+      }
+
+      // Create inbound firewall rule for the port
+      const inboundCommand = `netsh advfirewall firewall add rule name="${description}-Inbound" dir=in action=allow protocol=TCP localport=${port}`
+      
+      try {
+        await execAsync(inboundCommand, { timeout: 10000 })
+        this.logger.info(`✅ Windows firewall inbound rule created for port ${port}`)
+      } catch (inboundError) {
+        this.logger.debug(`Firewall inbound rule failed (may already exist):`, inboundError)
+      }
+
+      // Create outbound firewall rule for the port
+      const outboundCommand = `netsh advfirewall firewall add rule name="${description}-Outbound" dir=out action=allow protocol=TCP localport=${port}`
+      
+      try {
+        await execAsync(outboundCommand, { timeout: 10000 })
+        this.logger.info(`✅ Windows firewall outbound rule created for port ${port}`)
+      } catch (outboundError) {
+        this.logger.debug(`Firewall outbound rule failed (may already exist):`, outboundError)
+      }
+
+      // Also try to add rule for remote access
+      const remoteCommand = `netsh advfirewall firewall add rule name="${description}-Remote" dir=in action=allow protocol=TCP localport=${port} remoteip=any`
+      
+      try {
+        await execAsync(remoteCommand, { timeout: 10000 })
+        this.logger.info(`✅ Windows firewall remote access rule created for port ${port}`)
+      } catch (remoteError) {
+        this.logger.debug(`Firewall remote rule failed (may already exist):`, remoteError)
+      }
+
+    } catch (error) {
+      this.logger.warn(`Failed to configure Windows firewall for port ${port}:`, error)
+      this.logger.warn('💡 Manual firewall configuration may be required')
+    }
+  }
+
+  // Close Windows firewall rules during cleanup
+  private async closeWindowsFirewall(port: number, description: string): Promise<void> {
+    try {
+      if (process.platform !== 'win32') return
+
+      const { exec } = await import('child_process')
+      const { promisify } = await import('util')
+      const execAsync = promisify(exec)
+
+      // Remove firewall rules
+      const commands = [
+        `netsh advfirewall firewall delete rule name="${description}-Inbound"`,
+        `netsh advfirewall firewall delete rule name="${description}-Outbound"`,
+        `netsh advfirewall firewall delete rule name="${description}-Remote"`
+      ]
+
+      for (const command of commands) {
+        try {
+          await execAsync(command, { timeout: 5000 })
+          this.logger.debug(`🧹 Removed firewall rule for port ${port}`)
+        } catch (error) {
+          // Silent failure - rule might not exist
+        }
+      }
+
+    } catch (error) {
+      this.logger.debug(`Failed to remove firewall rules for port ${port}:`, error)
+    }
+  }
+
+  // Verify external accessibility of mapped ports
+  private async verifyExternalAccessibility(): Promise<void> {
+    try {
+      if (!this.externalIP) return
+
+      this.logger.info(`🔍 Verifying external accessibility via ${this.externalIP}...`)
+
+      for (const [port, mapping] of this.mappedPorts) {
+        if (mapping.description.includes('HTTP')) {
+          // Test HTTP port accessibility
+          try {
+            const testUrl = `http://${this.externalIP}:${port}/health`
+            this.logger.info(`🧪 Testing external HTTP access: ${testUrl}`)
+            
+            // Give the HTTP server time to start
+            await new Promise(resolve => setTimeout(resolve, 5000))
+            
+            const response = await fetch(testUrl, { 
+              signal: AbortSignal.timeout(10000),
+              headers: { 'User-Agent': 'DIG-Network-Test' }
+            })
+            
+            if (response.ok) {
+              this.logger.info(`✅ External HTTP access verified: ${port}`)
+            } else {
+              this.logger.warn(`⚠️ External HTTP access failed: ${port} (${response.status})`)
+            }
+          } catch (httpError) {
+            this.logger.warn(`⚠️ External HTTP test failed for port ${port}:`, httpError)
+            this.logger.warn(`💡 Check router port forwarding for port ${port}`)
+          }
+        }
+      }
+
+    } catch (error) {
+      this.logger.debug('External accessibility verification failed:', error)
     }
   }
 }
