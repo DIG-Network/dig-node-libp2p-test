@@ -82,16 +82,22 @@ export class UPnPPortManager {
       const wsPort = mainPort + 1
       const turnPort = this.digNode.config.turnPort || (mainPort + 100)
 
-      // 1. Open main LibP2P port (TCP)
-      await this.openPort(mainPort, 'tcp', 'DIG-LibP2P-Main')
+      // 1. Open main LibP2P port (TCP) with conflict resolution
+      const actualMainPort = await this.openPortWithConflictResolution(mainPort, 'tcp', 'DIG-LibP2P-Main')
 
-      // 2. Open WebSocket port for NAT traversal
-      await this.openPort(wsPort, 'tcp', 'DIG-WebSocket-NAT')
+      // 2. Open WebSocket port for NAT traversal (use next available port after main)
+      const actualWsPort = await this.openPortWithConflictResolution(actualMainPort + 1, 'tcp', 'DIG-WebSocket-NAT')
+
+      // Update the DIG node's port configuration with actual allocated ports
+      this.digNode.config.port = actualMainPort
+      this.digNode.portManager?.allocatedPorts?.set('libp2p-main', actualMainPort)
+      this.digNode.portManager?.allocatedPorts?.set('libp2p-websocket', actualWsPort)
 
       // 3. Open TURN server port (if we can act as TURN server)
       if (this.digNode.nodeCapabilities.turnServer) {
-        await this.openPort(turnPort, 'tcp', 'DIG-TURN-Server')
-        await this.openPort(turnPort, 'udp', 'DIG-TURN-Server-UDP')
+        const actualTurnPort = await this.openPortWithConflictResolution(turnPort, 'tcp', 'DIG-TURN-Server')
+        await this.openPortWithConflictResolution(actualTurnPort, 'udp', 'DIG-TURN-Server-UDP')
+        this.digNode.config.turnPort = actualTurnPort
       }
 
       const openedCount = this.mappedPorts.size
@@ -100,6 +106,11 @@ export class UPnPPortManager {
       // Log opened ports for user reference
       for (const [port, mapping] of this.mappedPorts) {
         this.logger.info(`   📡 Port ${port}/${mapping.protocol}: ${mapping.description}`)
+      }
+
+      // Log any port changes for user awareness
+      if (actualMainPort !== mainPort) {
+        this.logger.info(`🔄 Port conflict resolved: LibP2P port changed from ${mainPort} to ${actualMainPort}`)
       }
 
     } catch (error) {
@@ -135,6 +146,57 @@ export class UPnPPortManager {
     } catch (error) {
       this.logger.debug(`UPnP port mapping failed for ${port}/${protocol}:`, error)
     }
+  }
+
+  // Open port with automatic conflict resolution
+  private async openPortWithConflictResolution(preferredPort: number, protocol: 'tcp' | 'udp', description: string): Promise<number> {
+    const maxAttempts = 20 // Try up to 20 different ports
+    let currentPort = preferredPort
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        this.logger.debug(`🔧 Attempting UPnP port mapping: ${currentPort}/${protocol} (attempt ${attempt + 1})`)
+
+        // Check if this port is already mapped by checking UPnP mappings
+        const isConflict = await this.checkUPnPPortConflict(currentPort, protocol)
+        
+        if (isConflict) {
+          this.logger.debug(`⚠️ UPnP port ${currentPort}/${protocol} already mapped by another device, trying next port`)
+          currentPort++
+          continue
+        }
+
+        // Try to map the port
+        const mapping = await this.mapPortViaUPnP(currentPort, protocol, description)
+        
+        if (mapping) {
+          this.mappedPorts.set(currentPort, {
+            port: currentPort,
+            protocol,
+            description,
+            externalPort: mapping.externalPort || currentPort,
+            internalPort: currentPort,
+            mappedAt: Date.now(),
+            refreshInterval: 3600000, // 1 hour
+            lastRefresh: Date.now()
+          })
+
+          this.logger.info(`✅ UPnP port opened: ${currentPort}/${protocol} → external ${mapping.externalPort || currentPort}`)
+          return currentPort
+        } else {
+          this.logger.debug(`⚠️ Failed to map UPnP port ${currentPort}/${protocol}, trying next port`)
+          currentPort++
+        }
+
+      } catch (error) {
+        this.logger.debug(`UPnP port mapping attempt failed for ${currentPort}/${protocol}:`, error)
+        currentPort++
+      }
+    }
+
+    // If we couldn't find any available port, fall back to the preferred port
+    this.logger.warn(`⚠️ Could not find available UPnP port after ${maxAttempts} attempts, using preferred port ${preferredPort}`)
+    return preferredPort
   }
 
   // Detect UPnP availability manually
@@ -536,6 +598,47 @@ export class UPnPPortManager {
 
     } catch (error) {
       this.logger.debug('Failed to close UPnP mapping:', error)
+    }
+  }
+
+  // Check if a UPnP port mapping already exists (conflict detection)
+  private async checkUPnPPortConflict(port: number, protocol: string): Promise<boolean> {
+    try {
+      // Try to query existing UPnP mappings to detect conflicts
+      const natUpnp = await import('nat-upnp')
+      const client = natUpnp.createClient()
+
+      return new Promise<boolean>((resolve) => {
+        const timeout = setTimeout(() => {
+          resolve(false) // Assume no conflict if we can't check
+        }, 3000)
+
+        // Try to get mapping info for this port
+        client.getMappings((error: any, mappings: any[] | undefined) => {
+          clearTimeout(timeout)
+          
+          if (error || !mappings) {
+            resolve(false) // Assume no conflict if we can't check
+            return
+          }
+
+          // Check if any existing mapping uses this port
+          const conflict = mappings.some((mapping: any) => 
+            mapping.public === port && 
+            mapping.protocol?.toLowerCase() === protocol.toLowerCase()
+          )
+
+          if (conflict) {
+            this.logger.debug(`🚫 UPnP conflict detected for port ${port}/${protocol}`)
+          }
+
+          resolve(conflict)
+        })
+      })
+
+    } catch (error) {
+      this.logger.debug(`UPnP conflict check failed for ${port}/${protocol}:`, error)
+      return false // Assume no conflict if we can't check
     }
   }
 }

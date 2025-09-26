@@ -75,6 +75,9 @@ export class DIGNode {
   private logger = new Logger('DIGNode')
   private startTime = 0
   
+  // DIG peer tracking
+  private digPeers = new Map<string, any>()
+
   // Unified intelligent subsystems
   private peerDiscovery!: DIGOnlyPeerDiscovery
   private localNetworkDiscovery!: LocalNetworkDiscovery
@@ -227,29 +230,53 @@ export class DIGNode {
       this.logger.warn('⚠️ Circuit Relay disabled:', error)
     }
 
-    // Peer discovery configuration - use public LibP2P bootstrap servers
+    // Peer discovery configuration - enhanced for local DIG node discovery
     const peerDiscovery = []
     
     // Always use public LibP2P bootstrap servers for global connectivity
-    const publicBootstrapServers = [
-      '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-      '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-      '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
-      '/ip4/147.75.77.187/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
-    ]
-    
-    peerDiscovery.push(bootstrap({ list: publicBootstrapServers }))
-    this.logger.info(`🌐 Using ${publicBootstrapServers.length} public LibP2P bootstrap servers`)
-    
-    // Add custom DIG bootstrap servers if provided
-    if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {
-      peerDiscovery.push(bootstrap({ list: this.config.bootstrapPeers }))
-      this.logger.info(`🎯 Also using ${this.config.bootstrapPeers.length} custom DIG bootstrap servers`)
+    try {
+      peerDiscovery.push(bootstrap({
+        list: [
+          // Public LibP2P bootstrap servers
+          '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+          '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+          '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VBuFTjXPyBWWBGGvCVXVWb3DqhJ',
+          '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
+        ]
+      }))
+      this.nodeCapabilities.bootstrapServer = true
+      this.logger.info('✅ Public LibP2P bootstrap enabled')
+    } catch (error) {
+      this.logger.warn('⚠️ Bootstrap discovery disabled:', error)
     }
-    
+
+    // Enhanced mDNS for local DIG node discovery
     if (this.config.enableMdns !== false && !isAWS) {
-      peerDiscovery.push(mdns())
-      this.nodeCapabilities.mdns = true
+      try {
+        peerDiscovery.push(mdns({
+          // Enhanced mDNS configuration for better local discovery
+          interval: 10000, // Scan every 10 seconds
+          broadcast: true,
+          serviceTag: 'dig-network', // Custom service tag for DIG nodes
+          peerName: `dig-node-${this.node?.peerId?.toString()?.slice(-8) || 'unknown'}`
+        }))
+        this.nodeCapabilities.mdns = true
+        this.logger.info('✅ Enhanced mDNS local discovery enabled')
+      } catch (error) {
+        this.logger.warn('⚠️ mDNS discovery disabled:', error)
+      }
+    }
+
+    // Add custom DIG discovery servers
+    if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
+      try {
+        peerDiscovery.push(bootstrap({
+          list: this.config.discoveryServers
+        }))
+        this.logger.info(`✅ Custom DIG discovery servers: ${this.config.discoveryServers.length}`)
+      } catch (error) {
+        this.logger.warn('⚠️ Custom discovery servers disabled:', error)
+      }
     }
 
     // Create LibP2P node
@@ -277,22 +304,235 @@ export class DIGNode {
     this.logger.info('✅ LibP2P initialized with comprehensive NAT traversal')
   }
 
-  // Initialize intelligent subsystems
+  // Initialize intelligent subsystems after LibP2P is ready
   private async initializeIntelligentSubsystems(): Promise<void> {
-    // Initialize zero-knowledge privacy
-    this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
-    
-    // Initialize DIG-only subsystems
-    this.peerDiscovery = new DIGOnlyPeerDiscovery(this)
-    this.localNetworkDiscovery = new LocalNetworkDiscovery(this)
-    this.turnCoordination = new UnifiedTurnCoordination(this)
-    this.peerCapabilities = new PeerConnectionCapabilities(this)
-    this.natTraversal = new ComprehensiveNATTraversal(this)
-    this.downloadOrchestrator = new IntelligentDownloadOrchestrator(this)
-    this.upnpPortManager = new UPnPPortManager(this)
-    this.downloadManager = new DownloadManager(this.digPath, this)
-    
-    this.logger.info('✅ Intelligent subsystems initialized')
+    try {
+      this.logger.info('🧠 Initializing intelligent subsystems...')
+
+      // Set up peer connection handlers for DIG node identification
+      this.setupDIGPeerIdentification()
+
+      // Initialize UPnP port manager
+      this.upnpPortManager = new UPnPPortManager(this)
+
+      // Initialize local network discovery
+      this.localNetworkDiscovery = new LocalNetworkDiscovery(this)
+
+      // Initialize WebSocket relay for NAT traversal
+      if (this.config.discoveryServers && this.config.discoveryServers.length > 0) {
+        this.webSocketRelay = new WebSocketRelay(this.config.discoveryServers[0], this.node.peerId.toString())
+      }
+
+      // Initialize zero-knowledge privacy system
+      this.zkPrivacy = new ZeroKnowledgePrivacy(this.node.peerId.toString())
+
+      // Initialize download manager
+      this.downloadManager = new DownloadManager(this.digPath, this)
+
+      this.logger.info('✅ Intelligent subsystems initialized')
+
+    } catch (error) {
+      this.logger.error('Failed to initialize intelligent subsystems:', error)
+      throw error
+    }
+  }
+
+  // Set up DIG peer identification and prioritization
+  private setupDIGPeerIdentification(): void {
+    try {
+      // Listen for new peer connections
+      this.node.addEventListener('peer:connect', (event) => {
+        this.handleNewPeerConnection(event.detail)
+      })
+
+      // Listen for peer disconnections
+      this.node.addEventListener('peer:disconnect', (event) => {
+        this.handlePeerDisconnection(event.detail)
+      })
+
+      // Listen for peer discovery events
+      this.node.addEventListener('peer:discovery', (event) => {
+        this.handlePeerDiscovery(event.detail)
+      })
+
+      this.logger.info('✅ DIG peer identification handlers set up')
+
+    } catch (error) {
+      this.logger.warn('⚠️ Failed to set up peer identification:', error)
+    }
+  }
+
+  // Handle new peer connections with DIG node identification
+  private async handleNewPeerConnection(peerId: any): Promise<void> {
+    try {
+      this.logger.debug(`🔗 New peer connected: ${peerId.toString()}`)
+
+      // Try to identify if this is a DIG node
+      const isDIGNode = await this.identifyDIGNode(peerId)
+      
+      if (isDIGNode) {
+        this.logger.info(`🎯 DIG node identified: ${peerId.toString()}`)
+        
+        // Add to our DIG peer list
+        this.digPeers.set(peerId.toString(), {
+          peerId: peerId.toString(),
+          identified: true,
+          capabilities: {},
+          lastSeen: Date.now(),
+          connectionType: 'direct'
+        })
+
+        // Perform DIG handshake
+        await this.performDIGHandshake(peerId)
+      } else {
+        this.logger.debug(`🌐 Regular LibP2P peer: ${peerId.toString()}`)
+      }
+
+      // Update metrics
+      this.metrics.peersConnected = this.node.getPeers().length
+
+    } catch (error) {
+      this.logger.debug(`Failed to handle peer connection for ${peerId}:`, error)
+    }
+  }
+
+  // Handle peer disconnections
+  private handlePeerDisconnection(peerId: any): void {
+    try {
+      this.logger.debug(`🔌 Peer disconnected: ${peerId.toString()}`)
+      
+      // Remove from DIG peers if it was a DIG node
+      if (this.digPeers.has(peerId.toString())) {
+        this.digPeers.delete(peerId.toString())
+        this.logger.info(`📤 DIG node disconnected: ${peerId.toString()}`)
+      }
+
+      // Update metrics
+      this.metrics.peersConnected = this.node.getPeers().length
+
+    } catch (error) {
+      this.logger.debug(`Failed to handle peer disconnection for ${peerId}:`, error)
+    }
+  }
+
+  // Handle peer discovery events
+  private handlePeerDiscovery(peer: any): void {
+    try {
+      this.logger.debug(`🔍 Peer discovered: ${peer.id?.toString()} via ${peer.multiaddrs?.length || 0} addresses`)
+      
+      // If this peer has local addresses, it might be on our network
+      const hasLocalAddress = peer.multiaddrs?.some((addr: any) => {
+        const addrStr = addr.toString()
+        return addrStr.includes('192.168.') || 
+               addrStr.includes('10.0.') || 
+               addrStr.includes('172.16.') ||
+               addrStr.includes('127.0.0.1')
+      })
+
+      if (hasLocalAddress) {
+        this.logger.info(`🏠 Local network peer discovered: ${peer.id?.toString()}`)
+      }
+
+    } catch (error) {
+      this.logger.debug(`Failed to handle peer discovery:`, error)
+    }
+  }
+
+  // Identify if a peer is a DIG node
+  private async identifyDIGNode(peerId: any): Promise<boolean> {
+    try {
+      // Method 1: Try to open a DIG protocol stream
+      const stream = await this.node.dialProtocol(peerId, DIG_PROTOCOL)
+      if (stream) {
+        // Send a DIG identification request
+        const identificationRequest = {
+          type: 'identification',
+          version: '1.0.0',
+          timestamp: Date.now()
+        }
+        
+        const response = await this.sendStreamMessage(stream, identificationRequest)
+        await stream.close()
+        
+        if (response && response.type === 'dig-node') {
+          return true
+        }
+      }
+
+    } catch (error) {
+      // If DIG protocol fails, this is likely not a DIG node
+      this.logger.debug(`DIG identification failed for ${peerId}:`, error)
+    }
+
+    // Method 2: Check if peer responds to DIG discovery protocol
+    try {
+      const stream = await this.node.dialProtocol(peerId, DIG_DISCOVERY_PROTOCOL)
+      if (stream) {
+        await stream.close()
+        return true // If it accepts DIG discovery protocol, it's likely a DIG node
+      }
+    } catch (error) {
+      // Not a DIG node
+    }
+
+    return false
+  }
+
+  // Perform DIG handshake with a peer
+  private async performDIGHandshake(peerId: any): Promise<void> {
+    try {
+      const stream = await this.node.dialProtocol(peerId, DIG_PROTOCOL)
+      
+             const handshake: DIGHandshake = {
+         networkId: 'mainnet',
+         protocolVersion: '1.0.0',
+         softwareVersion: '1.0.0',
+         serverPort: this.config.port || 4001,
+         nodeType: NodeType.FULL_NODE,
+         capabilities: [
+           [CapabilityCode.STORE_SYNC, 'Store synchronization'],
+           [CapabilityCode.E2E_ENCRYPTION, 'End-to-end encryption'],
+           [CapabilityCode.BYTE_RANGE_DOWNLOAD, 'Parallel downloads']
+         ],
+         peerId: this.node.peerId.toString(),
+         cryptoIPv6: this.cryptoIPv6,
+         publicKey: this.config.publicKey || '',
+         timestamp: Date.now(),
+         stores: Array.from(this.digFiles.keys())
+       }
+
+      await this.sendStreamMessage(stream, handshake)
+      await stream.close()
+
+      this.logger.debug(`🤝 DIG handshake completed with ${peerId.toString()}`)
+
+    } catch (error) {
+      this.logger.debug(`DIG handshake failed with ${peerId}:`, error)
+    }
+  }
+
+  // Send message over stream and wait for response
+  private async sendStreamMessage(stream: Stream, message: any): Promise<any> {
+    try {
+      const messageData = uint8ArrayFromString(JSON.stringify(message))
+      
+      // Send message
+      await pipe([messageData], stream.sink)
+
+      // Read response
+      const response = await pipe(stream.source, async (source) => {
+        for await (const chunk of source) {
+          const responseStr = uint8ArrayToString(chunk.subarray())
+          return JSON.parse(responseStr)
+        }
+      })
+
+      return response
+
+    } catch (error) {
+      this.logger.debug('Stream message failed:', error)
+      throw error
+    }
   }
 
   // Start core services

@@ -16,6 +16,7 @@
     "hotel-test": "tsx examples/hotel-network-test.ts",
     "connect-local": "tsx examples/connect-local-dig-peers.ts",
     "gateway": "tsx examples/gateway-server.ts",
+    "test-multi": "tsx examples/multi-node-test.ts",
     "docker:build": "docker build -t dig-bootstrap .",
     "build-sw": "tsc src/service-worker/dig-service-worker.ts --outDir public --target es2020 --lib es2020,webworker --skipLibCheck",
     "serve": "http-server public -p 3000"

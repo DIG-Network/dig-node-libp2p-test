@@ -20,6 +20,7 @@ export declare class DIGNode {
     private isStarted;
     private logger;
     private startTime;
+    private digPeers;
     private peerDiscovery;
     private localNetworkDiscovery;
     private turnCoordination;
@@ -39,6 +40,13 @@ export declare class DIGNode {
     start(): Promise<void>;
     private initializeLibP2PWithNATTraversal;
     private initializeIntelligentSubsystems;
+    private setupDIGPeerIdentification;
+    private handleNewPeerConnection;
+    private handlePeerDisconnection;
+    private handlePeerDiscovery;
+    private identifyDIGNode;
+    private performDIGHandshake;
+    private sendStreamMessage;
     private startCoreServices;
     private safeServiceInit;
     private handleDIGRequest;
