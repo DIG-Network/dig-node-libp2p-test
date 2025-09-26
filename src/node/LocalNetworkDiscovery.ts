@@ -18,6 +18,8 @@ export class LocalNetworkDiscovery {
   private digNode: any
   private localDIGPeers = new Map<string, LocalDIGPeer>()
   private scanInterval: NodeJS.Timeout | null = null
+  private cachedLocalIP: string | null = null
+  private lastIPCheck = 0
 
   // Common local network ranges
   private readonly LOCAL_NETWORK_RANGES = [
@@ -69,6 +71,13 @@ export class LocalNetworkDiscovery {
   // Get our local IP address (enhanced detection)
   private async getLocalIPAddress(): Promise<string | null> {
     try {
+      const now = Date.now()
+      
+      // Use cached IP if recent (within 30 seconds) to reduce spam
+      if (this.cachedLocalIP && (now - this.lastIPCheck) < 30000) {
+        return this.cachedLocalIP
+      }
+
       const { networkInterfaces } = await import('os')
       const interfaces = networkInterfaces()
       
@@ -96,7 +105,14 @@ export class LocalNetworkDiscovery {
             ip.startsWith('172.19.') ||
             ip.startsWith('172.2') ||
             ip.startsWith('172.3')) {
-          this.logger.info(`🏠 Local network IP detected: ${ip}`)
+          
+          // Only log if IP changed or first detection
+          if (this.cachedLocalIP !== ip) {
+            this.logger.info(`🏠 Local network IP detected: ${ip}`)
+          }
+          
+          this.cachedLocalIP = ip
+          this.lastIPCheck = now
           return ip
         }
       }

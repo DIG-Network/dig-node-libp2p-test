@@ -1199,10 +1199,11 @@ export class DIGNode {
                 return false;
             }
             this.logger.info('🌐 Using AWS bootstrap server as fallback for peer discovery...');
-            // Register with AWS bootstrap server
+            // Register with AWS bootstrap server using crypto-IPv6 addresses only
             const registrationData = {
                 peerId: this.node.peerId.toString(),
-                addresses: this.node.getMultiaddrs().map(addr => addr.toString()),
+                addresses: [`/ip6/${this.cryptoIPv6}/tcp/${this.config.port || 4001}/p2p/${this.node.peerId.toString()}`],
+                realAddresses: this.node.getMultiaddrs().map(addr => addr.toString()), // Real addresses stored privately
                 cryptoIPv6: this.cryptoIPv6,
                 stores: Array.from(this.digFiles.keys()),
                 version: '1.0.0',
