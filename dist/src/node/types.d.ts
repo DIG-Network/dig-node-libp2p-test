@@ -17,13 +17,15 @@ export interface DIGNodeConfig {
     privateKey?: string;
     bootstrapPeers?: string[];
     port?: number;
+    httpPort?: number;
+    wsPort?: number;
+    turnPort?: number;
     connectToPeers?: string[];
     enableMdns?: boolean;
     enableDht?: boolean;
     discoveryServers?: string[];
     enableGlobalDiscovery?: boolean;
     enableTurnServer?: boolean;
-    turnPort?: number;
 }
 export interface NodeCapabilities {
     libp2p: boolean;

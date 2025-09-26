@@ -559,12 +559,12 @@ export class DIGNode {
         this.startStoreSync();
         this.logger.info('✅ All core services started');
     }
-    // Start HTTP server for direct .dig file downloads
+    // Start HTTP server for direct .dig file downloads on safe port
     async startHTTPDownloadServer() {
         try {
             const express = await import('express');
             const app = express.default();
-            const httpPort = (this.config.port || 4001) + 1000;
+            const httpPort = this.config.httpPort || 8080; // Use safe HTTP port
             // Enable CORS for cross-origin requests
             app.use((req, res, next) => {
                 res.header('Access-Control-Allow-Origin', '*');

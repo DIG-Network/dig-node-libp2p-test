@@ -23,14 +23,16 @@ export interface DIGNodeConfig {
   publicKey?: string;
   privateKey?: string;
   bootstrapPeers?: string[];
-  port?: number;
+  port?: number; // LibP2P main port (default: 8082)
+  httpPort?: number; // HTTP download port (default: 8080)
+  wsPort?: number; // WebSocket port (default: 8081)
+  turnPort?: number; // TURN server port (default: 3478)
   connectToPeers?: string[]; // Manual peer connections
   enableMdns?: boolean;
   enableDht?: boolean;
   discoveryServers?: string[]; // Custom bootstrap/discovery servers
   enableGlobalDiscovery?: boolean;
   enableTurnServer?: boolean; // Act as TURN server for other nodes
-  turnPort?: number; // Port for TURN server functionality
   // 🔐 ALL PRIVACY FEATURES ARE MANDATORY (graceful degradation only if unsupported)
   // No configuration options to disable privacy - it's always enabled
 }

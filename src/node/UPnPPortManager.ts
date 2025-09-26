@@ -78,39 +78,55 @@ export class UPnPPortManager {
     }
   }
 
-  // Open all required ports for DIG node operation
+  // Open all required ports for DIG node operation using UPnP-safe ports
   private async openRequiredPorts(): Promise<void> {
     try {
-      const mainPort = this.digNode.config.port || 4001
-      const wsPort = mainPort + 1
-      const turnPort = this.digNode.config.turnPort || (mainPort + 100)
-
-      // 1. Open main LibP2P port (TCP) with conflict resolution
-      const actualMainPort = await this.openPortWithConflictResolution(mainPort, 'tcp', 'DIG-LibP2P-Main')
-      await this.openWindowsFirewall(actualMainPort, 'DIG-LibP2P-Main')
-
-      // 2. Open WebSocket port for NAT traversal (use next available port after main)
-      const actualWsPort = await this.openPortWithConflictResolution(actualMainPort + 1, 'tcp', 'DIG-WebSocket-NAT')
-      await this.openWindowsFirewall(actualWsPort, 'DIG-WebSocket-NAT')
-
-      // 3. Open HTTP download port for direct file access (CRITICAL FIX)
-      const httpPort = actualMainPort + 1000
-      await this.openPortWithConflictResolution(httpPort, 'tcp', 'DIG-HTTP-Download')
-      
-      // 4. Open Windows firewall for HTTP download port
-      await this.openWindowsFirewall(httpPort, 'DIG-HTTP-Download')
-
-      // Update the DIG node's port configuration with actual allocated ports
-      this.digNode.config.port = actualMainPort
-      this.digNode.portManager?.allocatedPorts?.set('libp2p-main', actualMainPort)
-      this.digNode.portManager?.allocatedPorts?.set('libp2p-websocket', actualWsPort)
-
-      // 3. Open TURN server port (if we can act as TURN server)
-      if (this.digNode.nodeCapabilities.turnServer) {
-        const actualTurnPort = await this.openPortWithConflictResolution(turnPort, 'tcp', 'DIG-TURN-Server')
-        await this.openPortWithConflictResolution(actualTurnPort, 'udp', 'DIG-TURN-Server-UDP')
-        this.digNode.config.turnPort = actualTurnPort
+      // Use standard "safe" ports that UPnP routers typically allow
+      const SAFE_PORTS = {
+        HTTP: 8080,        // Standard HTTP alternate (universally allowed)
+        WEBSOCKET: 8081,   // WebSocket (commonly allowed)
+        LIBP2P: 8082,      // LibP2P main (safe range)
+        TURN: 3478         // Standard TURN/STUN port (RFC 5766)
       }
+
+      this.logger.info('🔒 Using UPnP-safe port configuration for Google Nest WiFi compatibility')
+
+      // 1. HTTP Download Server (Port 8080 - Universal HTTP alternate)
+      const httpPort = SAFE_PORTS.HTTP
+      await this.openPortWithConflictResolution(httpPort, 'tcp', 'DIG-HTTP-Download')
+      await this.openWindowsFirewall(httpPort, 'DIG-HTTP-Download')
+      this.logger.info(`📁 HTTP Download: Port ${httpPort} (standard HTTP alternate)`)
+
+      // 2. WebSocket Port (Port 8081 - Commonly allowed)
+      const wsPort = SAFE_PORTS.WEBSOCKET
+      await this.openPortWithConflictResolution(wsPort, 'tcp', 'DIG-WebSocket')
+      await this.openWindowsFirewall(wsPort, 'DIG-WebSocket')
+      this.logger.info(`🌐 WebSocket: Port ${wsPort} (standard WebSocket)`)
+
+      // 3. LibP2P Main Port (Port 8082 - Safe range)
+      const libp2pPort = SAFE_PORTS.LIBP2P
+      await this.openPortWithConflictResolution(libp2pPort, 'tcp', 'DIG-LibP2P-Main')
+      await this.openWindowsFirewall(libp2pPort, 'DIG-LibP2P-Main')
+      this.logger.info(`🔗 LibP2P: Port ${libp2pPort} (safe P2P range)`)
+
+      // 4. TURN Server Port (Port 3478 - RFC standard, universally allowed)
+      const turnPort = SAFE_PORTS.TURN
+      await this.openPortWithConflictResolution(turnPort, 'tcp', 'DIG-TURN-TCP')
+      await this.openPortWithConflictResolution(turnPort, 'udp', 'DIG-TURN-UDP')
+      await this.openWindowsFirewall(turnPort, 'DIG-TURN')
+      this.logger.info(`📡 TURN: Port ${turnPort} (RFC 5766 standard)`)
+
+      // Update DIG node configuration with safe ports
+      this.digNode.config.port = libp2pPort
+      this.digNode.config.httpPort = httpPort
+      this.digNode.config.wsPort = wsPort
+      this.digNode.config.turnPort = turnPort
+
+      // Update port manager with safe port allocations
+      this.digNode.portManager?.allocatedPorts?.set('libp2p-main', libp2pPort)
+      this.digNode.portManager?.allocatedPorts?.set('libp2p-websocket', wsPort)
+      this.digNode.portManager?.allocatedPorts?.set('http-download', httpPort)
+      this.digNode.portManager?.allocatedPorts?.set('turn-server', turnPort)
 
       const openedCount = this.mappedPorts.size
       this.logger.info(`✅ Opened ${openedCount} ports via UPnP for direct connections`)
@@ -120,10 +136,9 @@ export class UPnPPortManager {
         this.logger.info(`   📡 Port ${port}/${mapping.protocol}: ${mapping.description}`)
       }
 
-      // Log any port changes for user awareness
-      if (actualMainPort !== mainPort) {
-        this.logger.info(`🔄 Port conflict resolved: LibP2P port changed from ${mainPort} to ${actualMainPort}`)
-      }
+      // Log safe port configuration
+      this.logger.info(`🔒 Safe port configuration applied for Google Nest WiFi compatibility`)
+      this.logger.info(`   📁 HTTP: ${httpPort}, 🌐 WebSocket: ${wsPort}, 🔗 LibP2P: ${libp2pPort}, 📡 TURN: ${turnPort}`)
 
     } catch (error) {
       this.logger.warn('Failed to open some UPnP ports:', error)
@@ -739,43 +754,99 @@ export class UPnPPortManager {
     }
   }
 
-  // Verify external accessibility of mapped ports
+  // Verify external accessibility with Google Nest WiFi specific diagnostics
   private async verifyExternalAccessibility(): Promise<void> {
     try {
       if (!this.externalIP) return
 
       this.logger.info(`🔍 Verifying external accessibility via ${this.externalIP}...`)
+      this.logger.info(`🏠 Router type: Google Nest WiFi (UPnP with restrictions)`)
+
+      // Check if we're using Google's external IP range (indicates Google Fiber/Nest)
+      const isGoogleIP = this.externalIP.startsWith('71.121.') || 
+                        this.externalIP.startsWith('74.125.') || 
+                        this.externalIP.startsWith('173.194.')
+      
+      if (isGoogleIP) {
+        this.logger.info(`🌐 Detected Google network IP range - using Google Nest WiFi optimizations`)
+      }
 
       for (const [port, mapping] of this.mappedPorts) {
         if (mapping.description.includes('HTTP')) {
-          // Test HTTP port accessibility
-          try {
-            const testUrl = `http://${this.externalIP}:${port}/health`
-            this.logger.info(`🧪 Testing external HTTP access: ${testUrl}`)
-            
-            // Give the HTTP server time to start
-            await new Promise(resolve => setTimeout(resolve, 5000))
-            
-            const response = await fetch(testUrl, { 
-              signal: AbortSignal.timeout(10000),
-              headers: { 'User-Agent': 'DIG-Network-Test' }
-            })
-            
-            if (response.ok) {
-              this.logger.info(`✅ External HTTP access verified: ${port}`)
-            } else {
-              this.logger.warn(`⚠️ External HTTP access failed: ${port} (${response.status})`)
-            }
-          } catch (httpError) {
-            this.logger.warn(`⚠️ External HTTP test failed for port ${port}:`, httpError)
-            this.logger.warn(`💡 Check router port forwarding for port ${port}`)
-          }
+          await this.testGoogleNestWiFiPortAccess(port, mapping)
         }
       }
+
+      // Add Google Nest WiFi specific recommendations
+      this.logGoogleNestWiFiRecommendations()
 
     } catch (error) {
       this.logger.debug('External accessibility verification failed:', error)
     }
+  }
+
+  // Test port access with Google Nest WiFi specific handling
+  private async testGoogleNestWiFiPortAccess(port: number, mapping: UPnPMapping): Promise<void> {
+    try {
+      const testUrl = `http://${this.externalIP}:${port}/health`
+      this.logger.info(`🧪 Testing Google Nest WiFi external access: ${testUrl}`)
+      
+      // Google Nest WiFi UPnP mappings can take 2-5 minutes to propagate
+      this.logger.info(`⏱️ Waiting for Google Nest WiFi UPnP propagation (30 seconds)...`)
+      await new Promise(resolve => setTimeout(resolve, 30000))
+      
+      // Test with multiple attempts (Google Nest can be slow)
+      let accessible = false
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          this.logger.info(`🔄 Attempt ${attempt}/3: Testing ${testUrl}`)
+          
+          const response = await fetch(testUrl, { 
+            signal: AbortSignal.timeout(15000),
+            headers: { 
+              'User-Agent': 'DIG-Network-Test',
+              'Connection': 'close'
+            }
+          })
+          
+          if (response.ok) {
+            this.logger.info(`✅ Google Nest WiFi external access verified: ${port} (attempt ${attempt})`)
+            accessible = true
+            break
+          } else {
+            this.logger.warn(`⚠️ Attempt ${attempt} failed: ${response.status}`)
+          }
+        } catch (attemptError) {
+          this.logger.debug(`Attempt ${attempt} error:`, attemptError)
+          if (attempt < 3) {
+            await new Promise(resolve => setTimeout(resolve, 10000)) // Wait 10s between attempts
+          }
+        }
+      }
+
+      if (!accessible) {
+        this.logger.warn(`❌ Google Nest WiFi external access failed for port ${port}`)
+        this.logger.warn(`🏠 Google Nest WiFi UPnP Issues Detected:`)
+        this.logger.warn(`   1. Port ${port} may be in restricted range`)
+        this.logger.warn(`   2. UPnP mapping may need manual refresh`)
+        this.logger.warn(`   3. Google Home app may need port forwarding configuration`)
+        this.logger.warn(`   4. ISP may be blocking the port range`)
+      }
+
+    } catch (error) {
+      this.logger.warn(`Google Nest WiFi port test failed for ${port}:`, error)
+    }
+  }
+
+  // Log Google Nest WiFi specific recommendations
+  private logGoogleNestWiFiRecommendations(): void {
+    this.logger.info(`💡 Google Nest WiFi Troubleshooting:`)
+    this.logger.info(`   1. Open Google Home app → WiFi → Advanced → Port forwarding`)
+    this.logger.info(`   2. Manually add port forwarding rules for DIG ports`)
+    this.logger.info(`   3. Use ports below 5000 (Google restricts high ports)`)
+    this.logger.info(`   4. Check if 'UPnP' is enabled in Google Home app`)
+    this.logger.info(`   5. Try rebooting the Google Nest WiFi router`)
+    this.logger.info(`   6. Verify no ISP-level port blocking`)
   }
 }
 

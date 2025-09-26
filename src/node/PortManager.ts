@@ -14,8 +14,17 @@ import { Logger } from './logger.js'
 export class PortManager {
   private logger = new Logger('PortManager')
   private allocatedPorts = new Map<string, number>()
-  private portRangeStart = 4001
-  private portRangeEnd = 4100
+  
+  // Use UPnP-safe ports for Google Nest WiFi compatibility
+  private readonly SAFE_PORTS = {
+    HTTP: 8080,        // Standard HTTP alternate (universally allowed)
+    WEBSOCKET: 8081,   // WebSocket (commonly allowed)
+    LIBP2P: 8082,      // LibP2P main (safe range)
+    TURN: 3478         // Standard TURN/STUN port (RFC 5766)
+  }
+  
+  private portRangeStart = 8080
+  private portRangeEnd = 8090
 
   constructor() {
     this.logger.info('🔧 Port manager initialized')
@@ -101,14 +110,14 @@ export class PortManager {
     this.logger.info(`🧹 Released ${count} allocated ports`)
   }
 
-  // Generate LibP2P address configuration with available ports
+  // Generate LibP2P address configuration with UPnP-safe ports
   async generateLibP2PAddressConfig(preferredPort: number, isAWS: boolean): Promise<any> {
     try {
-      // Find available main port
-      const mainPort = await this.findAvailablePort(preferredPort, 'libp2p-main')
+      // Use safe ports for Google Nest WiFi compatibility
+      const mainPort = await this.findAvailablePort(this.SAFE_PORTS.LIBP2P, 'libp2p-main')
       
-      // Find available WebSocket port
-      const wsPort = await this.findAvailablePort(mainPort + 1, 'libp2p-websocket')
+      // Use safe WebSocket port
+      const wsPort = await this.findAvailablePort(this.SAFE_PORTS.WEBSOCKET, 'libp2p-websocket')
 
       // Generate address configuration
       const addresses = {
