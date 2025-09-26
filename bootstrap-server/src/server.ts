@@ -199,70 +199,88 @@ app.post('/register', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: peerId, addresses' })
     }
 
-    // 🔐 MANDATORY PRIVACY VALIDATION
-    if (!cryptoIPv6) {
-      return res.status(400).json({ 
-        error: 'PRIVACY VIOLATION: cryptoIPv6 is mandatory for all registrations',
-        required: 'All peers must have crypto-IPv6 addresses'
-      })
-    }
-
-    if (privacyMode !== true) {
-      console.log(`⚠️ PRIVACY ENFORCEMENT: Forcing privacyMode=true for ${peerId}`)
-      // Force privacy mode - no option to disable
-    }
-
-    // Validate that addresses are crypto-IPv6 only (no real IPs exposed)
-    const hasRealIPs = addresses.some(addr => 
-      addr.includes('/ip4/') && !addr.includes('/ip6/fd00:')
-    )
+    // Simplified registration - allow real addresses for direct P2P connections
+    console.log(`🔗 Registering peer for direct P2P connectivity: ${peerId}`)
     
-    if (hasRealIPs) {
-      console.log(`🚨 PRIVACY VIOLATION: Peer ${peerId} attempting to register with real IP addresses`)
-      return res.status(403).json({
-        error: 'PRIVACY VIOLATION: Real IP addresses not allowed in public registration',
-        required: 'Only crypto-IPv6 addresses permitted',
-        received: addresses.length,
-        cryptoIPv6Required: true
+    if (!addresses || !Array.isArray(addresses) || addresses.length === 0) {
+      return res.status(400).json({ 
+        error: 'No valid addresses provided for peer registration',
+        required: 'At least one LibP2P address is required'
       })
     }
 
-    console.log(`🔐 Privacy validation passed for ${peerId}: crypto-IPv6 only, privacy mode enforced`)
-
-    // MANDATORY PRIVACY: Always use crypto-IPv6 addresses only
+    // Simplified peer registration for direct P2P connectivity
     const peer: RegisteredPeer = {
       peerId,
-      addresses: [`/ip6/${cryptoIPv6}/tcp/4001/p2p/${peerId}`, `/ip6/${cryptoIPv6}/ws/p2p/${peerId}`], // ALWAYS crypto-IPv6
-      realAddresses: addresses, // Store real addresses privately for authenticated resolution only
-      cryptoIPv6,
+      addresses, // Use real LibP2P addresses for direct connections
+      realAddresses: addresses, // Keep for compatibility
+      cryptoIPv6: cryptoIPv6 || `fd00:${peerId.slice(-32)}`, // Generate if not provided
       stores,
       version,
-      privacyMode: true, // ALWAYS true - mandatory privacy
+      privacyMode: privacyMode !== false, // Default to true but not mandatory
       capabilities: capabilities,
       turnCapable: turnCapable || capabilities?.turnServer || false,
       bootstrapCapable: bootstrapCapable || capabilities?.bootstrapServer || false,
+      turnAddresses: req.body.turnAddresses,
+      turnPort: req.body.turnPort,
+      turnCapacity: req.body.turnCapacity,
+      turnLoad: 0,
       lastSeen: Date.now(),
-      // Comprehensive handshake information (MANDATORY)
-      networkId,
-      softwareVersion,
-      serverPort,
-      nodeType,
-      capabilityList,
-      // Zero-knowledge privacy features (MANDATORY)
-      zkProofSupported,
-      onionRoutingSupported,
-      timingObfuscationEnabled,
-      trafficMixingEnabled,
-      metadataScrambled
+      // Comprehensive handshake information
+      networkId: networkId || 'mainnet',
+      softwareVersion: softwareVersion || '1.0.0',
+      serverPort: serverPort || 4001,
+      nodeType: nodeType || 0,
+      capabilityList: capabilityList || [],
+      // Zero-knowledge privacy features (optional)
+      zkProofSupported: zkProofSupported !== false,
+      onionRoutingSupported: onionRoutingSupported !== false,
+      timingObfuscationEnabled: timingObfuscationEnabled !== false,
+      trafficMixingEnabled: trafficMixingEnabled !== false,
+      metadataScrambled: metadataScrambled !== false
     }
 
+    // Clean up expired peers before processing registration
+    const now = Date.now()
+    let cleanedCount = 0
+    
+    for (const [id, existingPeer] of registeredPeers.entries()) {
+      if (id !== peerId && now - existingPeer.lastSeen > PEER_TIMEOUT) {
+        registeredPeers.delete(id)
+        turnServers.delete(id)
+        cleanedCount++
+        console.log(`🧹 Cleaned up expired peer during registration: ${id} (inactive for ${Math.round((now - existingPeer.lastSeen) / 60000)} minutes)`)
+      }
+    }
+
+    // Check if this peer is already registered
+    const existingPeer = registeredPeers.get(peerId)
+    const isUpdate = existingPeer !== undefined
+
+    // Add or update the peer (always use latest information)
     registeredPeers.set(peerId, peer)
-    console.log(`✅ Registered peer: ${peerId} (${stores.length} stores, v${version})`)
+    
+    // Auto-register as TURN server if TURN capable
+    if (peer.turnCapable && peer.turnAddresses && peer.turnPort) {
+      turnServers.set(peerId, peer)
+      console.log(`📡 Auto-registered TURN server: ${peerId}:${peer.turnPort} (UPnP enabled)`)
+    }
+    
+    if (isUpdate) {
+      console.log(`🔄 Updated existing peer: ${peerId} (${stores.length} stores, v${version}${peer.turnCapable ? ', TURN capable' : ''}) - Total: ${registeredPeers.size}`)
+    } else {
+      console.log(`✅ Registered new peer: ${peerId} (${stores.length} stores, v${version}${peer.turnCapable ? ', TURN capable' : ''}) - Total: ${registeredPeers.size}`)
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`🧹 Registration cleanup: removed ${cleanedCount} expired peers`)
+    }
     
     res.json({ 
       success: true, 
       peerId, 
       totalPeers: registeredPeers.size,
+      cleanedExpiredPeers: cleanedCount,
       timestamp: new Date().toISOString()
     })
   } catch (error) {
@@ -315,16 +333,31 @@ app.post('/heartbeat', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required field: peerId' })
     }
 
+    // Clean up expired peers when active peers send heartbeats
+    const now = Date.now()
+    let cleanedCount = 0
+    
+    for (const [id, existingPeer] of registeredPeers.entries()) {
+      if (id !== peerId && now - existingPeer.lastSeen > PEER_TIMEOUT) {
+        registeredPeers.delete(id)
+        turnServers.delete(id)
+        cleanedCount++
+        console.log(`🧹 Cleaned up expired peer during heartbeat: ${id} (inactive for ${Math.round((now - existingPeer.lastSeen) / 60000)} minutes)`)
+      }
+    }
+
     const peer = registeredPeers.get(peerId)
     if (peer) {
       // Update lastSeen timestamp
-      peer.lastSeen = Date.now()
-      console.log(`💓 Heartbeat received from peer: ${peerId}`)
+      peer.lastSeen = now
+      console.log(`💓 Heartbeat received from peer: ${peerId}${cleanedCount > 0 ? ` (cleaned ${cleanedCount} expired peers)` : ''}`)
       
       res.json({ 
         success: true, 
         peerId,
         lastSeen: peer.lastSeen,
+        totalPeers: registeredPeers.size,
+        cleanedExpiredPeers: cleanedCount,
         timestamp: new Date().toISOString()
       })
     } else {
@@ -364,6 +397,19 @@ app.post('/register-turn-server', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: peerId, turnAddresses, turnPort' })
     }
 
+    // Clean up expired peers during TURN registration
+    const now = Date.now()
+    let cleanedCount = 0
+    
+    for (const [id, existingPeer] of registeredPeers.entries()) {
+      if (now - existingPeer.lastSeen > PEER_TIMEOUT) {
+        registeredPeers.delete(id)
+        turnServers.delete(id)
+        cleanedCount++
+        console.log(`🧹 Cleaned up expired peer during TURN registration: ${id}`)
+      }
+    }
+
     const peer = registeredPeers.get(peerId)
     if (peer) {
       peer.turnCapable = true
@@ -371,11 +417,16 @@ app.post('/register-turn-server', (req: Request, res: Response) => {
       peer.turnPort = turnPort
       peer.turnCapacity = turnCapacity
       peer.turnLoad = 0
+      peer.lastSeen = now // Update heartbeat
       
       turnServers.set(peerId, peer)
-      console.log(`📡 Registered TURN server: ${peerId}:${turnPort}`)
+      console.log(`📡 Registered TURN server: ${peerId}:${turnPort}${cleanedCount > 0 ? ` (cleaned ${cleanedCount} expired peers)` : ''}`)
       
-      res.json({ success: true, turnServers: turnServers.size })
+      res.json({ 
+        success: true, 
+        turnServers: turnServers.size,
+        cleanedExpiredPeers: cleanedCount
+      })
     } else {
       res.status(404).json({ error: 'Peer not found - register peer first' })
     }
@@ -1190,12 +1241,12 @@ io.on('connection', (socket: Socket) => {
   })
 })
 
-// Cleanup stale peers periodically (timeout-based only - peers must ping us to stay alive)
+// Periodic cleanup (reduced frequency since cleanup happens on-demand during registration/heartbeat)
 setInterval(async () => {
   const now = Date.now()
   let cleanedCount = 0
   
-  console.log(`🔍 Checking ${registeredPeers.size} registered peers for heartbeat timeout...`)
+  console.log(`🔍 Periodic cleanup check: ${registeredPeers.size} registered peers`)
   
   for (const [peerId, peer] of registeredPeers) {
     // Only remove peers that haven't sent heartbeat for the full timeout period
@@ -1203,17 +1254,16 @@ setInterval(async () => {
       registeredPeers.delete(peerId)
       turnServers.delete(peerId)
       cleanedCount++
-      console.log(`🧹 Removed expired peer: ${peerId} (no heartbeat for ${Math.round((now - peer.lastSeen) / 60000)} minutes)`)
+      console.log(`🧹 Periodic cleanup: removed expired peer ${peerId} (no heartbeat for ${Math.round((now - peer.lastSeen) / 60000)} minutes)`)
     }
   }
   
   if (cleanedCount > 0) {
-    console.log(`🔍 Cleanup complete: ${cleanedCount} expired peers removed, ${registeredPeers.size} active`)
-    console.log(`💡 Reminder: Peers must send heartbeat via POST /heartbeat every ${PEER_TIMEOUT / 60000} minutes`)
+    console.log(`🔍 Periodic cleanup: ${cleanedCount} expired peers removed, ${registeredPeers.size} active`)
   } else {
-    console.log(`🔍 All ${registeredPeers.size} peers sending heartbeats regularly`)
+    console.log(`🔍 Periodic cleanup: all ${registeredPeers.size} peers active (heartbeats working)`)
   }
-}, 5 * 60 * 1000) // Every 5 minutes
+}, 15 * 60 * 1000) // Every 15 minutes (reduced since on-demand cleanup is primary)
 
 // Note: Peer reachability is now determined by heartbeat messages, not connection testing
 // This is more reliable for NAT-ed peers that can't accept incoming connections

@@ -288,22 +288,38 @@ export class DIGNode {
     async setupAWSBootstrapFallback() {
         try {
             this.logger.info('🌐 Setting up AWS bootstrap server as last resort fallback...');
-            // 1. Register with AWS bootstrap server
+            // 1. Always register with AWS bootstrap server (not just when peer count is low)
             const registered = await this.useAWSBootstrapFallback();
             if (registered) {
-                // 2. Discover peers if we have low connectivity
-                const peerCount = this.node.getPeers().length;
-                if (peerCount < 5) {
-                    this.logger.info(`🔍 Low peer count (${peerCount}) - discovering peers from AWS bootstrap...`);
-                    await this.discoverPeersFromAWSBootstrap();
-                }
-                // 3. Set up periodic heartbeat to keep registration active (every 2 minutes)
+                // 2. Always discover peers from AWS bootstrap to find other DIG nodes
+                this.logger.info(`🔍 Discovering DIG peers from AWS bootstrap...`);
+                await this.discoverPeersFromAWSBootstrap();
+                // 3. Set up intelligent periodic heartbeat system (every 2 minutes)
+                let consecutiveFailures = 0;
+                const maxFailures = 3;
                 setInterval(async () => {
                     try {
-                        await this.sendAWSBootstrapHeartbeat();
+                        const success = await this.sendAWSBootstrapHeartbeat();
+                        if (success) {
+                            consecutiveFailures = 0; // Reset failure count on success
+                        }
+                        else {
+                            consecutiveFailures++;
+                            this.logger.debug(`AWS bootstrap heartbeat failed (${consecutiveFailures}/${maxFailures})`);
+                            // If we have multiple consecutive failures, try full re-registration
+                            if (consecutiveFailures >= maxFailures) {
+                                this.logger.info('🔄 Multiple heartbeat failures - attempting full re-registration...');
+                                const reregistered = await this.useAWSBootstrapFallback();
+                                if (reregistered) {
+                                    consecutiveFailures = 0; // Reset on successful re-registration
+                                    this.logger.info('✅ AWS bootstrap re-registration successful after heartbeat failures');
+                                }
+                            }
+                        }
                     }
                     catch (error) {
-                        this.logger.debug('AWS bootstrap heartbeat failed:', error);
+                        consecutiveFailures++;
+                        this.logger.debug(`AWS bootstrap heartbeat error (${consecutiveFailures}/${maxFailures}):`, error);
                     }
                 }, 2 * 60 * 1000); // Every 2 minutes to stay well within 10-minute timeout
                 this.logger.info('✅ AWS bootstrap fallback configured successfully');
@@ -404,38 +420,47 @@ export class DIGNode {
     }
     // Identify if a peer is a DIG node
     async identifyDIGNode(peerId) {
+        const peerIdStr = peerId.toString();
+        this.logger.debug(`🔍 Attempting to identify DIG node: ${peerIdStr}`);
         try {
             // Method 1: Try to open a DIG protocol stream
+            this.logger.debug(`📡 Trying DIG protocol stream to ${peerIdStr}`);
             const stream = await this.node.dialProtocol(peerId, DIG_PROTOCOL);
             if (stream) {
                 // Send a DIG identification request
                 const identificationRequest = {
-                    type: 'identification',
+                    type: 'DIG_NETWORK_IDENTIFICATION',
                     version: '1.0.0',
                     timestamp: Date.now()
                 };
+                this.logger.debug(`📤 Sending DIG identification request to ${peerIdStr}`);
                 const response = await this.sendStreamMessage(stream, identificationRequest);
                 await stream.close();
-                if (response && response.type === 'dig-node') {
+                this.logger.debug(`📥 DIG identification response from ${peerIdStr}:`, response);
+                if (response && response.isDIGNode === true) {
+                    this.logger.info(`🎯 DIG node confirmed via protocol: ${peerIdStr}`);
                     return true;
                 }
             }
         }
         catch (error) {
             // If DIG protocol fails, this is likely not a DIG node
-            this.logger.debug(`DIG identification failed for ${peerId}:`, error);
+            this.logger.debug(`DIG protocol identification failed for ${peerIdStr}:`, error);
         }
         // Method 2: Check if peer responds to DIG discovery protocol
         try {
+            this.logger.debug(`📡 Trying DIG discovery protocol to ${peerIdStr}`);
             const stream = await this.node.dialProtocol(peerId, DIG_DISCOVERY_PROTOCOL);
             if (stream) {
                 await stream.close();
+                this.logger.info(`🎯 DIG node confirmed via discovery protocol: ${peerIdStr}`);
                 return true; // If it accepts DIG discovery protocol, it's likely a DIG node
             }
         }
         catch (error) {
-            // Not a DIG node
+            this.logger.debug(`DIG discovery protocol failed for ${peerIdStr}:`, error);
         }
+        this.logger.debug(`❌ Peer ${peerIdStr} is not a DIG node`);
         return false;
     }
     // Perform DIG handshake with a peer
@@ -1207,18 +1232,28 @@ export class DIGNode {
                 return false;
             }
             this.logger.info('🌐 Using AWS bootstrap server as fallback for peer discovery...');
-            // Register with AWS bootstrap server using crypto-IPv6 addresses only
+            // Determine TURN capability based on UPnP and external connectivity
+            const hasUPnPExternalIP = this.upnpPortManager?.getExternalIP() !== null;
+            const upnpPortMapped = this.upnpPortManager?.isPortMapped(this.config.port || 4001) || false;
+            const canAcceptDirectConnections = hasUPnPExternalIP && upnpPortMapped;
+            // If UPnP is working and ports are mapped, this node can act as TURN server
+            const isTurnCapable = canAcceptDirectConnections || this.nodeCapabilities.turnServer;
+            if (isTurnCapable && hasUPnPExternalIP) {
+                this.logger.info(`📡 Node is TURN capable: UPnP external IP (${this.upnpPortManager?.getExternalIP()}) with port mapping`);
+            }
+            // Register with AWS bootstrap server using real LibP2P addresses for direct P2P connections
             const registrationData = {
                 peerId: this.node.peerId.toString(),
-                addresses: [`/ip6/${this.cryptoIPv6}/tcp/${this.config.port || 4001}/p2p/${this.node.peerId.toString()}`],
-                realAddresses: this.node.getMultiaddrs().map(addr => addr.toString()), // Real addresses stored privately
-                cryptoIPv6: this.cryptoIPv6,
+                addresses: this.node.getMultiaddrs().map(addr => addr.toString()), // Use real addresses for P2P connections
                 stores: Array.from(this.digFiles.keys()),
                 version: '1.0.0',
-                privacyMode: true,
                 capabilities: this.nodeCapabilities,
-                turnCapable: this.nodeCapabilities.turnServer,
+                turnCapable: isTurnCapable,
                 bootstrapCapable: false,
+                // TURN server information if capable
+                turnAddresses: isTurnCapable ? this.upnpPortManager?.getExternalAddresses() || [] : undefined,
+                turnPort: isTurnCapable ? (this.config.port || 4001) : undefined,
+                turnCapacity: isTurnCapable ? 10 : undefined,
                 networkId: 'mainnet',
                 softwareVersion: '1.0.0',
                 serverPort: this.config.port || 4001,
@@ -1226,13 +1261,9 @@ export class DIGNode {
                 capabilityList: [
                     [1, 'Store synchronization'],
                     [4, 'End-to-end encryption'],
-                    [5, 'Byte-range downloads']
-                ],
-                zkProofSupported: true,
-                onionRoutingSupported: true,
-                timingObfuscationEnabled: true,
-                trafficMixingEnabled: true,
-                metadataScrambled: true
+                    [5, 'Byte-range downloads'],
+                    ...(isTurnCapable ? [[2, 'TURN relay server']] : [])
+                ]
             };
             const response = await fetch(`${awsConfig.url}/register`, {
                 method: 'POST',
@@ -1266,16 +1297,34 @@ export class DIGNode {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     peerId: this.node.peerId.toString()
-                })
+                }),
+                signal: AbortSignal.timeout(10000) // 10 second timeout
             });
             if (response.ok) {
                 const result = await response.json();
-                this.logger.debug(`💓 AWS bootstrap heartbeat sent successfully`);
+                this.logger.debug(`💓 AWS bootstrap heartbeat successful (${result.totalPeers} total peers)`);
                 return true;
             }
             else if (response.status === 404) {
                 // Peer not found - need to re-register
                 this.logger.info('🔄 Peer not found in AWS bootstrap - re-registering...');
+                const reregistered = await this.useAWSBootstrapFallback();
+                if (reregistered) {
+                    this.logger.info('✅ Successfully re-registered with AWS bootstrap');
+                }
+                else {
+                    this.logger.warn('❌ Re-registration failed - will retry on next heartbeat');
+                }
+                return reregistered;
+            }
+            else if (response.status === 429) {
+                // Rate limited or cost throttling - this is expected
+                this.logger.debug(`💰 AWS bootstrap heartbeat throttled: ${response.status} (cost protection active)`);
+                return false;
+            }
+            else if (response.status >= 500) {
+                // Server error - try to re-register in case of server restart
+                this.logger.warn(`⚠️ AWS bootstrap server error: ${response.status} - attempting re-registration...`);
                 return await this.useAWSBootstrapFallback();
             }
             else {
@@ -1284,6 +1333,17 @@ export class DIGNode {
             }
         }
         catch (error) {
+            // Network error or timeout - try to re-register
+            if (error instanceof Error && (error.name === 'AbortError' || error.message.includes('fetch'))) {
+                this.logger.debug('🌐 AWS bootstrap network error - attempting re-registration...');
+                try {
+                    return await this.useAWSBootstrapFallback();
+                }
+                catch (reregError) {
+                    this.logger.debug('Re-registration also failed:', reregError);
+                    return false;
+                }
+            }
             this.logger.debug('AWS bootstrap heartbeat failed:', error);
             return false;
         }
@@ -1346,13 +1406,23 @@ export class DIGNode {
         this.logger.info('🔍 Starting comprehensive peer discovery...');
         // Primary: Use DIG-only peer discovery
         await this.peerDiscovery?.discoverDIGPeers?.();
-        // Fallback: Use AWS bootstrap server if low peer count
-        const currentPeerCount = this.node.getPeers().length;
-        if (currentPeerCount < 3) {
-            this.logger.info('🌐 Low peer count - attempting AWS bootstrap fallback...');
-            await this.useAWSBootstrapFallback();
-            // Discover peers from AWS bootstrap server
-            await this.discoverPeersFromAWSBootstrap();
+        // Last resort: Use AWS bootstrap server if no DIG peers found
+        const digPeerCount = this.peerDiscovery?.getDIGPeers()?.length || 0;
+        const totalPeerCount = this.node.getPeers().length;
+        if (digPeerCount === 0) {
+            this.logger.info(`🌐 No DIG peers found (${totalPeerCount} total LibP2P peers) - using AWS bootstrap as last resort...`);
+            // Try to ensure we're registered (in case previous registration failed)
+            const registered = await this.useAWSBootstrapFallback();
+            if (registered) {
+                // Discover and connect to DIG peers from AWS bootstrap server
+                await this.discoverPeersFromAWSBootstrap();
+            }
+            else {
+                this.logger.warn('⚠️ AWS bootstrap registration failed during peer discovery - will retry on next heartbeat');
+            }
+        }
+        else {
+            this.logger.info(`✅ Found ${digPeerCount} DIG peers via standard discovery - AWS bootstrap not needed`);
         }
     }
     // Discover peers from AWS bootstrap server
@@ -1364,21 +1434,28 @@ export class DIGNode {
                 const result = await response.json();
                 const peers = result.peers || [];
                 this.logger.info(`🔍 Discovered ${peers.length} peers from AWS bootstrap server`);
-                // Try to connect to DIG peers
-                for (const peer of peers.slice(0, 5)) { // Limit to 5 connections
+                // Try to connect to DIG peers using real LibP2P addresses
+                for (const peer of peers.slice(0, 10)) { // Limit to 10 to avoid overwhelming
                     if (peer.peerId !== this.node.peerId.toString() && peer.addresses?.length > 0) {
                         try {
-                            // Try to connect using real addresses (if available)
-                            const addresses = peer.realAddresses || peer.addresses;
-                            for (const address of addresses.slice(0, 2)) { // Try first 2 addresses
+                            this.logger.info(`🔍 Attempting direct P2P connection to DIG peer: ${peer.peerId}`);
+                            // Use real LibP2P addresses for direct connections (no crypto-IPv6 overlay)
+                            const addresses = peer.addresses;
+                            let connected = false;
+                            for (const address of addresses) {
                                 try {
+                                    this.logger.debug(`📡 Trying direct P2P address: ${address}`);
                                     await this.node.dial(address);
-                                    this.logger.info(`✅ Connected to AWS bootstrap peer: ${peer.peerId}`);
+                                    this.logger.info(`✅ Direct P2P connection established: ${peer.peerId}`);
+                                    connected = true;
                                     break;
                                 }
                                 catch (dialError) {
                                     this.logger.debug(`Failed to dial ${address}:`, dialError);
                                 }
+                            }
+                            if (!connected) {
+                                this.logger.debug(`⚠️ Direct P2P connection failed to ${peer.peerId} - will rely on LibP2P NAT traversal`);
                             }
                         }
                         catch (error) {

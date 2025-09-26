@@ -98,7 +98,7 @@ export declare class DIGNode {
     sendAWSBootstrapHeartbeat(): Promise<boolean>;
     useAWSBootstrapTURNFallback(targetPeerId: string, storeId?: string): Promise<any>;
     discoverAllPeers(): Promise<void>;
-    private discoverPeersFromAWSBootstrap;
+    discoverPeersFromAWSBootstrap(): Promise<void>;
     forceConnectToPeers(): Promise<void>;
     stop(): Promise<void>;
     private cleanup;
