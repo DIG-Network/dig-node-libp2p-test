@@ -51,7 +51,7 @@ export class SimpleDIGNode {
   // DIG Network protocol
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
-  // Single stable bootstrap server (ensure both nodes connect to same network)
+  // Single reliable bootstrap server (both nodes connect to same network)
   private readonly BOOTSTRAP_SERVER = '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN'
   
   // DIG Network gossip topic for peer announcements
