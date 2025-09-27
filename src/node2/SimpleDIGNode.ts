@@ -52,12 +52,11 @@ export class SimpleDIGNode {
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
   // Direct IP bootstrap server (more reliable than DNS)
-  // Bootstrap servers for peer discovery - using working public servers
-  private readonly BOOTSTRAP_SERVERS: string[] = [
-    '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ'
-  ]
+  // NO LibP2P bootstrap servers - using ONLY AWS DIG-aware server via HTTP
+  private readonly BOOTSTRAP_SERVERS: string[] = []
+  
+  // AWS DIG bootstrap server for HTTP-based peer discovery
+  private readonly AWS_DIG_BOOTSTRAP = 'http://dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com'
   
   // DIG Network gossip topic for peer announcements
   private readonly DIG_GOSSIP_TOPIC = 'dig-network-simple-v1'
@@ -138,6 +137,9 @@ export class SimpleDIGNode {
 
       // Announce our stores to the network
       await this.announceStores()
+      
+      // Register with AWS DIG bootstrap server
+      await this.registerWithAWSBootstrap()
 
       // Set up DIG network announcements for peer discovery
       setTimeout(async () => {
@@ -145,6 +147,7 @@ export class SimpleDIGNode {
           await this.waitForServicesToStart()
           await this.setupDIGNetworkAnnouncements()
           await this.searchForDIGPeersInDHT()
+          await this.queryAWSBootstrapForPeers()
         } catch (servicesError) {
           console.warn('⚠️ DHT/Gossip services failed, using direct peer testing only')
         }
@@ -596,6 +599,58 @@ export class SimpleDIGNode {
       
     } catch (error) {
       console.error('❌ Failed to connect to remote:', error)
+    }
+  }
+
+  // Register with AWS DIG bootstrap server via HTTP
+  private async registerWithAWSBootstrap(): Promise<void> {
+    try {
+      console.log('📡 Registering with AWS DIG bootstrap server...')
+      
+      const registration = {
+        peerId: this.node.peerId.toString(),
+        stores: Array.from(this.digFiles.keys()),
+        addresses: this.node.getMultiaddrs().map(addr => addr.toString()),
+        timestamp: Date.now()
+      }
+      
+      const response = await fetch(`${this.AWS_DIG_BOOTSTRAP}/register-dig-node`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(registration)
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('✅ Registered with AWS DIG bootstrap server')
+        console.log(`🔗 Bootstrap peers: ${result.bootstrapInfo?.totalPeers || 0}`)
+      } else {
+        console.warn('⚠️ Failed to register with AWS bootstrap:', response.status)
+      }
+      
+    } catch (error) {
+      console.warn('⚠️ AWS bootstrap registration failed:', error)
+    }
+  }
+
+  // Query AWS bootstrap server for other DIG peers
+  private async queryAWSBootstrapForPeers(): Promise<void> {
+    try {
+      console.log('🔍 Querying AWS bootstrap for DIG peers...')
+      
+      const response = await fetch(`${this.AWS_DIG_BOOTSTRAP}/libp2p-bootstrap`)
+      if (response.ok) {
+        const data = await response.json()
+        console.log(`📊 AWS bootstrap has ${data.bootstrap?.digNodes || 0} DIG nodes`)
+        
+        // TODO: Get peer list and attempt connections
+        
+      } else {
+        console.warn('⚠️ Failed to query AWS bootstrap:', response.status)
+      }
+      
+    } catch (error) {
+      console.warn('⚠️ AWS bootstrap query failed:', error)
     }
   }
 
