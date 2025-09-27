@@ -84,15 +84,10 @@ export class SimpleDIGNode {
         connectionEncrypters: [noise()],
         streamMuxers: [yamux()],
         peerDiscovery: [
-          bootstrap({
-            list: this.BOOTSTRAP_SERVERS,
-            timeout: 10000,
-            tagName: 'bootstrap'
-          }),
           mdns({
             interval: 5000, // More frequent mDNS announcements
             serviceTag: 'dig-network' // Specific service tag for DIG nodes
-          }) // Local network discovery for same-network nodes
+          }) // Local network discovery + AWS HTTP-based discovery
         ],
         services: {
           ping: ping(),
@@ -115,7 +110,7 @@ export class SimpleDIGNode {
 
       console.log(`✅ LibP2P node started: ${this.node.peerId.toString()}`)
       console.log(`📍 Listening on: ${this.node.getMultiaddrs().map(addr => addr.toString()).join(', ')}`)
-      console.log(`🔗 Bootstrap servers: ${this.BOOTSTRAP_SERVERS.length} configured`)
+      console.log(`🔗 Bootstrap: AWS HTTP-based discovery + mDNS`)
       
       // Monitor initial connection to bootstrap
       setTimeout(() => {
