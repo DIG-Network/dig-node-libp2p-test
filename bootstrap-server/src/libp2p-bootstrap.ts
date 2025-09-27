@@ -24,10 +24,14 @@ export class LibP2PBootstrapServer {
   private node!: Libp2p
   private isStarted = false
   private connectedPeers = new Set<string>()
-  private digPeers = new Set<string>()
+  private digPeers = new Map<string, { peerId: string, stores: string[], addresses: string[], lastSeen: number }>()
   
   // Standard LibP2P bootstrap port
   private readonly BOOTSTRAP_PORT = 4001
+  
+  // DIG Network protocol
+  private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
+  private readonly DIG_GOSSIP_TOPIC = 'dig-network-simple-v1'
 
   constructor() {
     console.log('🚀 Initializing dedicated LibP2P bootstrap server for DIG Network')
@@ -132,7 +136,12 @@ export class LibP2PBootstrapServer {
       const message = JSON.parse(uint8ArrayToString(data))
       
       if (message.type === 'dig_node_announcement') {
-        this.digPeers.add(message.peerId)
+        this.digPeers.set(message.peerId, {
+          peerId: message.peerId,
+          stores: message.stores || [],
+          addresses: message.addresses || [],
+          lastSeen: Date.now()
+        })
         console.log(`🎯 DIG node registered: ${message.peerId.substring(0, 20)}... (${message.stores?.length || 0} stores)`)
       }
 

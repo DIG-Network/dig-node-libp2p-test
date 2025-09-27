@@ -52,11 +52,11 @@ export class SimpleDIGNode {
   private readonly DIG_PROTOCOL = '/dig-simple/1.0.0'
   
   // Direct IP bootstrap server (more reliable than DNS)
-  // Bootstrap servers for peer discovery
+  // Bootstrap servers for peer discovery - DIG-aware dedicated server
   private readonly BOOTSTRAP_SERVERS: string[] = [
+    '/dns4/dig-bootstrap-v2-prod.eba-vfishzna.us-east-1.elasticbeanstalk.com/tcp/4001/p2p/12D3KooWQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
     '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ'
+    '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa'
   ]
   
   // DIG Network gossip topic for peer announcements
